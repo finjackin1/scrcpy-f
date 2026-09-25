@@ -54,8 +54,10 @@ Na lista da esquerda:
              Na aba "personalizar", clique no mapa para arrastar o
              celular para o lado da tela onde ele fica de verdade.
   APPS       cada app do celular numa janela propria do PC. Clique
-             abre; botao direito ajusta so aquele app (e cria o atalho
-             dele na area de trabalho).
+             abre; botao direito leva as configuracoes personalizadas
+             do app (formato, resolucao, video, audio) e cria o atalho
+             dele na area de trabalho. App duplicado (Dual Messenger)
+             aparece como "Nome (2)", na janela dele.
   STATUS     bateria, temperatura e o que pesa no celular.
   OPCOES     notificacoes, abrir com o Windows, pagina inicial, pasta do
              scrcpy, atualizacoes, atalhos de teclado e qualidade.

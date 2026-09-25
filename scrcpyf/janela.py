@@ -36,7 +36,7 @@ import tkinter.font as tkfont
 import traceback
 
 from . import (VERSAO, atalhos as atalhos_mod, conexao, inicio_windows,
-               moldura, monitores as mon, qualidade, sistema)
+               formatos, moldura, monitores as mon, qualidade, sistema)
 from . import estudio as E
 from .programa import APP, DEX, conteudo_do
 
@@ -106,15 +106,14 @@ ABAS = {
 APPS_RECENTES = 8
 # APPS > ajustes que mudam a janela de um app aberto (os outros so mudam a
 # lista): reabrem os apps abertos (r123).
-AJUSTES_DA_JANELA_DO_APP = ("onde", "tela")
+AJUSTES_DA_JANELA_DO_APP = ("onde", "formato")
 # Ajustes do app que NAO mexem na janela aberta (nao reabrem) -- r134.
-AJUSTES_SEM_REABRIR = ("jogo", "ao_fechar")
+AJUSTES_SEM_REABRIR = ("ao_fechar",)
 # Ao fechar a janela de um app (r134).
 AO_FECHAR = [("fechar", "fechar o app"), ("deixar", "deixar aberto")]
 # Telas que ficam guardadas (escondidas) ao sair e voltam prontas (r115/116).
 TELAS_GUARDADAS = ("_tela_apps_lista", "_tela_opcoes_qualidade",
                    "_tela_opcoes_atalhos")
-TELAS_DO_APP = [("celular", "do celular"), ("pc", "do monitor do pc")]   # quantos aparecem no grupo "recentes" da lista
 
 PRECISA = {"som": (30, "11"), "pc_cel": (33, "13"), "apps": (29, "10")}
 
@@ -125,6 +124,7 @@ CONTEUDOS = [("ambos", "imagem+som"), ("som", "só som"),
 NOME_CURTO = {
     ("video", "codec"): "codec", ("video", "bitrate"): "mb/s",
     ("video", "fps_max"): "quadros", ("video", "resolucao_max"): "resolução",
+    ("video", "resolucao"): "resolução",
     ("video", "buffer_ms"): "atraso ms", ("audio", "origem"): "toca em",
     ("audio", "codec"): "codec", ("audio", "bitrate"): "kb/s",
     ("audio", "buffer_ms"): "atraso ms",
@@ -513,14 +513,19 @@ class Janela(tk.Tk):
             a.definir(True)
             self._sublinhar(a)
             return
-        chaves = [c for c, _r in ABAS[self._item]]
-        for chave, rotulo in ABAS[self._item]:
+        visiveis = self._abas_visiveis()
+        self._abas_montadas = (self._item, tuple(visiveis))
+        chaves = [c for c, _r, _t in visiveis]
+        for chave, rotulo, travada in visiveis:
             if (self._item, chave) == ("celular", "status"):
                 rotulo = self._aba_celular_rotulo = self._nome_do_celular()
             a = E.Aba(self._abas_frame, rotulo,
                       lambda c=chave: self._escolher_aba(c))
             a.pack(side="left", fill="y", padx=(E.px(0), E.px(16)))
             a.definir(chave == self._aba[self._item])
+            if travada:
+                # (r185) Sem o scrcpy: apagada, sem foco nem clique.
+                a.configure(fg=E.LINHA_FORTE, cursor="arrow", takefocus=0)
             if chave == self._aba[self._item]:
                 self._sublinhar(a)
             # Teclado: setas trocam de aba.
@@ -529,14 +534,45 @@ class Janela(tk.Tk):
             a.bind("<Right>", lambda _e, k=k: self._aba_vizinha(k + 1))
             self._abas_w.append(a)
 
+    def _abas_visiveis(self) -> list:
+        """
+        (r185, pedidos dele) As abas do item agora: [(chave, rotulo,
+        travada)]. PERSONALIZADOS so aparece com algum app personalizado
+        (ou com um sendo editado). Sem o scrcpy, em OPCOES so "geral"
+        abre: atalhos e qualidade ficam travadas.
+        """
+        saida = []
+        sem_scrcpy = not self._config.instalacao_ok
+        for chave, rotulo in ABAS[self._item]:
+            if (self._item, chave) == ("apps", "personalizados") and not (
+                    self._config.personalizados()
+                    or getattr(self, "_app_configurado", None)):
+                continue
+            travada = sem_scrcpy and self._item == "opcoes" and \
+                chave != "geral"
+            saida.append((chave, rotulo, travada))
+        return saida
+
+    def _acertar_abas(self) -> None:
+        """(r185) A aba escolhida sumiu ou travou -> a primeira; e se a
+        barra de abas montada nao bate com a de agora, remonta."""
+        visiveis = self._abas_visiveis()
+        livres = [c for c, _r, t in visiveis if not t]
+        if livres and self._aba.get(self._item) not in livres:
+            self._aba[self._item] = livres[0]
+        if getattr(self, "_abas_montadas", None) != (self._item,
+                                                    tuple(visiveis)) \
+                and not self._grande:
+            self._montar_abas()
+
     def _aba_vizinha(self, k: int):
-        chaves = [c for c, _r in ABAS[self._item]]
+        chaves = [c for c, _r, _t in self._abas_visiveis()]
         if 0 <= k < len(chaves):
             self._escolher_aba(chaves[k])
         return "break"
 
     def _focar_aba_escolhida(self) -> None:
-        chaves = [c for c, _r in ABAS[self._item]]
+        chaves = [c for c, _r, _t in self._abas_visiveis()]
         try:
             k = chaves.index(self._aba[self._item])
             self._abas_w[k].focus_set()
@@ -583,6 +619,8 @@ class Janela(tk.Tk):
     def _escolher_aba(self, aba: str) -> None:
         if aba == self._aba[self._item]:
             return
+        if any(c == aba and t for c, _r, t in self._abas_visiveis()):
+            return                          # (r185) travada sem o scrcpy
         self._esvaziar_caixas()
         self._cancelar_gravacao(sem_tela=True)
         # A aba com o foco e destruida ao remontar: o foco volta para a nova.
@@ -635,6 +673,7 @@ class Janela(tk.Tk):
         """
         self._cancelar_deslize()
         self._travar_itens()
+        self._acertar_abas()
         # SEM PISCAR: a tela nova e montada POR CIMA da velha e so depois a
         # velha sai. Apagar primeiro deixava a area vazia por um instante,
         # e no Windows isso aparece como a aba inteira piscando.
@@ -1982,6 +2021,7 @@ class Janela(tk.Tk):
     def _configurar_app(self, pacote: str, nome: str) -> None:
         """"personalizar" no menu do app: a aba personalizados abre nele."""
         self._app_configurado = (pacote, nome)
+        self._grupo_editor = None     # (r190) abre com tudo recolhido
         self._escolhendo_app = False
         if self._aba.get("apps") == "personalizados":
             self._montar_conteudo()
@@ -1993,7 +2033,6 @@ class Janela(tk.Tk):
     def _menu_do_app(self, evento, pacote: str, nome: str) -> None:
         self._fechar_menu_app()
         fixado = pacote in self._config.fixados()
-        jogo = self.programa.e_jogo(pacote)
         menu = tk.Toplevel(self)
         menu.overrideredirect(True)
         menu.attributes("-topmost", True)
@@ -2016,11 +2055,10 @@ class Janela(tk.Tk):
             cheia = [("tela cheia",
                       lambda: p.reabrir_app(pacote, tela_cheia=True))]
         opcoes = cheia + [
-                  ("personalizar", lambda: self._configurar_app(pacote, nome)),
+                  ("configurações personalizadas",
+                   lambda: self._configurar_app(pacote, nome)),
                   ("desafixar" if fixado else "fixar na lista",
                    lambda: self._fixar_app(pacote, not fixado)),
-                  ("desmarcar como jogo" if jogo else "marcar como jogo",
-                   lambda: self._marcar_jogo(pacote, not jogo)),
                   # (r159) I2 da v1.0: atalho com o nome e o icone do app.
                   ("criar atalho na área de trabalho",
                    lambda: self._criar_atalho_desktop(pacote, nome))]
@@ -2069,15 +2107,6 @@ class Janela(tk.Tk):
                 menu.destroy()
             except tk.TclError:
                 pass
-
-    def _marcar_jogo(self, pacote: str, sim: bool) -> None:
-        """JOGO (pedido dele, 23/set/2026): abre no formato do monitor do
-        pc -- para quando o celular nao diz que o app e jogo."""
-        # Igual ao que o celular diz = nao precisa guardar nada.
-        detectado = pacote in self.programa.jogos_detectados
-        self._virar_app(pacote, "jogo", "" if sim == detectado else sim)
-        if self._aba.get("apps") == "personalizados":
-            self._montar_conteudo()
 
     def _fixar_app(self, pacote: str, sim: bool) -> None:
         self._conferir_gravacao(self._config.fixar(pacote, sim))
@@ -2622,17 +2651,15 @@ class Janela(tk.Tk):
             side="top", fill="x", pady=(E.px(6), E.px(0)))
         if self._falta("som"):
             self._cortina(caixa_som, "som", "som do celular no pc", curta=True)
-        # TAMANHO DA TELA DO APP (23/set/2026): a do celular ou a do monitor
-        # do pc (o jogo abre na resolucao e no formato do monitor).
-        E.Rotulo(dir_, "tamanho da tela do app").pack(
+        # (r184) FORMATO DA TELA DO APP (antes: celular ou monitor).
+        E.Rotulo(dir_, "formato da tela do app").pack(
             side="top", fill="x", pady=(E.px(14), E.px(6)))
-        E.Segmentado(dir_, TELAS_DO_APP, geral.get("tela", "celular"),
-                     lambda v: self._virar_apps(
-                         "tela", "" if v == "celular" else v)).pack(
+        E.Segmentado(dir_, formatos.FORMATOS, geral.get("formato", ""),
+                     lambda v: self._virar_apps("formato", v or "")).pack(
             side="top", fill="x")
-        E.Texto(dir_, "monitor do pc: o app abre deitado, na resolução do "
-                      "monitor principal. app marcado como jogo abre sempre "
-                      "assim.",
+        E.Texto(dir_, "celular: em pé, como no aparelho. cada app pode ter o "
+                      "seu formato e a sua resolução nas configurações "
+                      "personalizadas (botão direito no app).",
                 cor=E.APAGADO, tamanho=E.ROTULO, largura=E.px(230)).pack(
             side="top", fill="x", pady=(E.px(6), E.px(0)))
 
@@ -2769,22 +2796,22 @@ class Janela(tk.Tk):
             partes.append("som")
         if conf.get("onde"):
             partes.append("toca: " + dict(qualidade.ONDE).get(conf["onde"], ""))
-        if conf.get("jogo") is True:
-            partes.append("jogo")
-        elif conf.get("jogo") is False:
-            partes.append("não é jogo")
-        if conf.get("tela"):
-            partes.append("tela " + dict(TELAS_DO_APP).get(conf["tela"], ""))
+        if conf.get("formato"):
+            partes.append(formatos.rotulo(conf["formato"]))
+        if conf.get("resolucao"):
+            partes.append("%sp" % conf["resolucao"])
         return " · ".join(partes)
 
     def _editar_personalizado(self, pacote: str, nome: str) -> None:
         self._app_configurado = (pacote, nome)
+        self._grupo_editor = None     # (r190) abre com tudo recolhido
         self._escolhendo_app = False
         self._montar_conteudo()
 
     def _voltar_personalizados(self) -> None:
         self._app_configurado = None
         self._escolhendo_app = False
+        # (r185) Sem nenhum personalizado a aba some: volta para a lista.
         self._montar_conteudo()
 
     def _limpar_personalizado(self, pacote: str) -> None:
@@ -2832,27 +2859,52 @@ class Janela(tk.Tk):
         fino_v = deste.get("video_fino") or {}
         fino_a = deste.get("audio_fino") or {}
 
+        # (r189) PREDEFINICAO NO TOPO (vale para imagem e som juntos) e o
+        # resto em TRES GRUPOS que abrem um de cada vez (pedido dele,
+        # 25/set/2026: "separadas por tipo: video, audio, outros... ao abrir
+        # uma sessao recolhe a outra"). (r190) Tudo recolhido ao entrar.
         E.Rotulo(corpo, "predefinição").pack(side="top", fill="x",
                                              pady=(E.px(0), E.px(6)))
         E.Segmentado(corpo, [(c, n) for c, n, _v, _a, _f in
                              qualidade.todas_predef(q)], predef,
                      lambda v: self._mudou_no_app(pacote, "predef", v)).pack(
             side="top", fill="x", pady=(E.px(0), E.px(10)))
+        self._ui["grupos_editor"] = {}
+        g_video = self._grupo_do_editor(corpo, "video", "vídeo")
+        g_audio = self._grupo_do_editor(corpo, "audio", "áudio")
+        g_outros = self._grupo_do_editor(corpo, "outros", "outros")
 
-        E.Rotulo(corpo, "imagem").pack(side="top", fill="x",
-                                       pady=(E.px(0), E.px(6)))
+        # -- VIDEO: formato e resolucao primeiro (r184), depois as fileiras.
+        formato = deste.get("formato") or ""
+        E.Rotulo(g_video, "formato").pack(
+            side="top", fill="x", pady=(E.px(4), E.px(6)))
+        E.Segmentado(g_video, formatos.FORMATOS, formato,
+                     lambda v: self._mudou_no_app(pacote, "formato", v)).pack(
+            side="top", fill="x", pady=(E.px(0), E.px(4)))
+        E.Texto(g_video, "celular: em pé, como no aparelho. os outros abrem "
+                         "deitados (jogo costuma pedir 16:9).",
+                cor=E.APAGADO, tamanho=E.ROTULO, largura=E.px(480)).pack(
+            side="top", fill="x", pady=(E.px(0), E.px(6)))
+        E.Rotulo(g_video, "resolução").pack(
+            side="top", fill="x", pady=(E.px(8), E.px(6)))
+        E.Segmentado(g_video, formatos.rotulos_de_resolucao(
+                         formatos.possiveis(formato, self.programa.celular)),
+                     deste.get("resolucao") or "",
+                     lambda v: self._mudou_no_app(pacote, "resolucao", v)).pack(
+            side="top", fill="x", pady=(E.px(0), E.px(10)))
         for ajuste in qualidade.AJUSTES_VIDEO:
             campo = ajuste["campo"]
-            self._fila(corpo, NOME_CURTO.get(("video", campo), campo),
+            if campo in ("resolucao", "resolucao_max"):
+                continue            # (r184) e a resolucao da tela, acima
+            self._fila(g_video, NOME_CURTO.get(("video", campo), campo),
                        self._opcoes_curtas(ajuste),
                        fino_v.get(campo, base_v.get(campo)),
                        lambda v, c=campo: self._fino_do_app(pacote, "video",
                                                             c, v))
 
-        caixa_som = tk.Frame(corpo, bg=E.FUNDO)
-        caixa_som.pack(side="top", fill="x")
-        E.Rotulo(caixa_som, "som").pack(side="top", fill="x",
-                                        pady=(E.px(8), E.px(6)))
+        # -- AUDIO
+        caixa_som = tk.Frame(g_audio, bg=E.FUNDO)
+        caixa_som.pack(side="top", fill="x", pady=(E.px(4), E.px(0)))
         codec = fino_a.get("codec", base_a.get("codec"))
         for ajuste in qualidade.AJUSTES_AUDIO:
             campo = ajuste["campo"]
@@ -2872,30 +2924,18 @@ class Janela(tk.Tk):
                      or "celular",
                      lambda v: self._mudou_no_app(pacote, "onde", v)).pack(
             side="top", fill="x", pady=(E.px(0), E.px(6)))
-        jogo = self.programa.e_jogo(pacote)
-        self._chave(corpo, "é um jogo", jogo,
-                    lambda v: self._marcar_jogo(pacote, v),
-                    explicacao=("o celular diz que é jogo. " if pacote in
-                                self.programa.jogos_detectados else "") +
-                    "abre deitado, no formato do monitor do pc",
-                    borda=False)
-        E.Rotulo(corpo, "tamanho da tela do app").pack(
-            side="top", fill="x", pady=(E.px(8), E.px(6)))
-        E.Segmentado(corpo, TELAS_DO_APP,
-                     deste.get("tela") or ("pc" if jogo else None)
-                     or self._config.apps.get("tela") or "celular",
-                     lambda v: self._mudou_no_app(pacote, "tela", v)).pack(
-            side="top", fill="x", pady=(E.px(0), E.px(6)))
-        E.Rotulo(corpo, "ao fechar a janela").pack(
-            side="top", fill="x", pady=(E.px(8), E.px(6)))
-        E.Segmentado(corpo, AO_FECHAR,
+
+        # -- OUTROS
+        E.Rotulo(g_outros, "ao fechar a janela").pack(
+            side="top", fill="x", pady=(E.px(4), E.px(6)))
+        E.Segmentado(g_outros, AO_FECHAR,
                      deste.get("ao_fechar")
                      or self._config.apps.get("ao_fechar") or "fechar",
                      lambda v: self._mudou_no_app(pacote, "ao_fechar", v)).pack(
             side="top", fill="x", pady=(E.px(0), E.px(6)))
         # (r148) TECLADO DO CELULAR NA JANELA (pedido dele, 25/set/2026):
         # desligado de fabrica, com o aviso de QUANDO ligar.
-        self._chave(corpo, "mostrar o teclado do celular",
+        self._chave(g_outros, "mostrar o teclado do celular",
                     bool(deste.get("teclado_celular")),
                     lambda v: self._virar_app(pacote, "teclado_celular",
                                               True if v else ""),
@@ -2907,9 +2947,51 @@ class Janela(tk.Tk):
         E.Texto(corpo, "o que você escolher aqui vale só para este app, e já "
                        "vale na janela aberta.",
                 cor=E.APAGADO, tamanho=E.ROTULO, largura=E.px(480)).pack(
-            side="top", fill="x", pady=(E.px(4), E.px(0)))
+            side="top", fill="x", pady=(E.px(10), E.px(0)))
         if self._falta("som"):
             self._cortina(caixa_som, "som", "som do celular no pc", curta=True)
+        self._pintar_grupos_editor()
+
+    # (r189) GRUPOS DO EDITOR DO APP: um cabecalho clicavel (mouse, Enter,
+    # espaco) e o corpo embaixo; so um aberto por vez, trocado NO LUGAR
+    # (sem remontar a tela = sem piscar). Clicar no aberto recolhe.
+    def _grupo_do_editor(self, pai, chave: str, titulo: str) -> tk.Frame:
+        cab = tk.Frame(pai, bg=E.FUNDO)
+        cab.pack(side="top", fill="x", pady=(E.px(2), E.px(0)))
+        rot = tk.Label(cab, text="", bg=E.FUNDO, fg=E.TEXTO,
+                       font=E.fonte(E.PEQUENA), anchor="w", cursor="hand2",
+                       takefocus=1, highlightthickness=1,
+                       highlightbackground=E.FUNDO, highlightcolor=E.ACENTO,
+                       padx=E.px(2), pady=E.px(6))
+        rot.pack(side="top", fill="x")
+        tk.Frame(cab, bg=E.LINHA, height=1).pack(side="top", fill="x")
+        for ev in ("<Button-1>", "<Return>", "<space>"):
+            rot.bind(ev, lambda _e, k=chave: self._abrir_grupo_editor(k))
+        corpo = tk.Frame(pai, bg=E.FUNDO)
+        self._ui["grupos_editor"][chave] = (cab, rot, titulo, corpo)
+        return corpo
+
+    def _abrir_grupo_editor(self, chave: str):
+        aberto = getattr(self, "_grupo_editor", None)
+        self._grupo_editor = None if aberto == chave else chave
+        self._pintar_grupos_editor()
+        return "break"
+
+    def _pintar_grupos_editor(self) -> None:
+        aberto = getattr(self, "_grupo_editor", None)
+        for chave, (cab, rot, titulo, corpo) in \
+                (self._ui.get("grupos_editor") or {}).items():
+            try:
+                rot.configure(text="%s  %s" % ("▾" if chave == aberto
+                                               else "▸", titulo.upper()),
+                              fg=E.TEXTO if chave == aberto else E.TEXTO_2)
+                if chave == aberto:
+                    corpo.pack(side="top", fill="x", after=cab,
+                               pady=(E.px(0), E.px(8)))
+                else:
+                    corpo.pack_forget()
+            except tk.TclError:
+                pass
 
     def _opcoes_curtas(self, ajuste) -> list:
         return [(v, ROTULO_CURTO.get(str(v), ROTULO_CURTO.get(r, r.lower())))
@@ -2920,8 +3002,13 @@ class Janela(tk.Tk):
             # Escolher a predefinicao poe as fileiras todas nela.
             self._config.definir_app(pacote, "video_fino", "")
             self._config.definir_app(pacote, "audio_fino", "")
+        if campo == "formato":
+            res = self._config.app(pacote).get("resolucao")
+            if res and res not in formatos.possiveis(valor or "",
+                                                     self.programa.celular):
+                self._config.definir_app(pacote, "resolucao", "")
         self._virar_app(pacote, campo, valor or "")
-        if campo == "predef":
+        if campo in ("predef", "formato"):
             self.after_idle(self._montar_conteudo)
 
     def _fino_do_app(self, pacote: str, secao: str, campo: str, valor) -> None:
@@ -3117,9 +3204,7 @@ class Janela(tk.Tk):
         antes = pacote in self._config.personalizados()
         self._conferir_gravacao(self._config.definir_app(pacote, campo, valor))
         self.programa.anotar("app %s: %s = %s" % (pacote, campo, valor))
-        if campo not in AJUSTES_SEM_REABRIR or (
-                campo == "jogo" and not self._config.app(pacote).get("tela")):
-            # "jogo" so muda a janela quando decide a tela (sem tela a mao).
+        if campo not in AJUSTES_SEM_REABRIR:
             self._agendar_reabrir({pacote})
         # Virou (ou deixou de ser) personalizado: o "voltar tudo ao padrao"
         # aparece/some no editor.
@@ -3905,6 +3990,10 @@ class Janela(tk.Tk):
                                      pady=(E.px(0), E.px(6)))
         for ajuste in qualidade.AJUSTES_VIDEO:
             campo = ajuste["campo"]
+            if campo == "resolucao":
+                # (r189) em "p", so as que a tela do celular tem.
+                ajuste = dict(ajuste, opcoes=qualidade.opcoes_de_resolucao(
+                    self.programa.celular))
             self._fila(esq, NOME_CURTO.get(("video", campo), campo),
                        self._opcoes_curtas(ajuste), video.get(campo),
                        lambda v, c=campo: self._escolheu_qualidade("video", c, v))

@@ -206,6 +206,7 @@ def ler_argumentos(argv) -> tuple[str, str]:
             pacote = argv[i + 1]
         elif a == "--nome" and i + 1 < len(argv):
             nome = argv[i + 1]
-    if not re.fullmatch(r"[A-Za-z0-9._]+", pacote or ""):
+    # (r186) copia de app duplicado: "<pacote>@<usuario>".
+    if not re.fullmatch(r"[A-Za-z0-9._]+(@\d+)?", pacote or ""):
         return "", ""
     return pacote, nome

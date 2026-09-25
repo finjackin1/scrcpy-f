@@ -142,6 +142,21 @@ DEX = "__dex__"
 ICONE_DEX = "com.sec.android.desktopmode.uiservice"
 CACHE_VERSAO = 2   # apps.json de cada celular (ver `_preparar_celular`)
 
+# (r186) APP DUPLICADO (Dual Messenger, apps duplos, perfil de trabalho): a
+# copia mora noutro USUARIO do Android. Aqui ela e "<pacote>@<usuario>"
+# (ex.: "com.whatsapp@95") em TUDO que e do programa -- sessao, config,
+# icone, atalho, recentes --, e so vira pacote + "--user" ao falar com o
+# Android. Provado pela sonda_duplicado (25/set/2026).
+COPIA = "@"
+# Usuarios que NAO entram (privacidade): a Pasta Segura do Samsung.
+USUARIO_FORA = ("secure", "segur", "knox")
+
+
+def separar_app(chave: str) -> tuple[str, int]:
+    """("com.whatsapp", 95) de "com.whatsapp@95"; (pacote, 0) do original."""
+    pacote, _, usuario = (chave or "").partition(COPIA)
+    return pacote, (int(usuario) if usuario.isdigit() else 0)
+
 
 def _tamanho_em_bytes(texto: str) -> int:
     """ "253M", "1.7G", "22800" (K) -> bytes, como o `top` escreve."""
@@ -188,24 +203,17 @@ class Programa:
 
     def __init__(self, registro=None) -> None:
         self.registro = registro
+        # (r191) ANTES de qualquer thread: o vigia da conexao sobe aqui
+        # embaixo e le `_sair` no laco -- sem isto ele podia morrer na
+        # largada (achado no teste de fumaca, 25/set/2026).
+        self._sair = False
         # Um degrau acima do normal: o vigia da borda tem que responder no
         # quadro certo mesmo com o jogo rodando (pedido dele, 21/set/2026).
         sistema.prioridade_do_programa()
         self.config = Config.carregar()
+        self._migrar_formatos()
         self._tirar_tela_ligada_da_extensao()
         self._acertar_o_som_da_extensao()
-        # O servidor do ADB acorda agora, e nao no primeiro clique (ver
-        # `celular.aquecer`).
-        if self.config.instalacao_ok:
-            threading.Thread(target=celular.aquecer,
-                             args=(self.config.adb_exe,), daemon=True,
-                             name="aquecer-adb").start()
-            # (r161) CONEXAO EM TEMPO REAL: o proprio adb avisa cada celular
-            # que entra ou sai (`adb track-devices`).
-            self._garantir_vigia_conexao()
-            # (r141) As opcoes do scrcpy lidas agora, e nao no 1o app.
-            threading.Thread(target=self._scrcpy_aceita, args=("",),
-                             daemon=True, name="ajuda-scrcpy").start()
         self.sessoes: dict[str, Sessao] = {}
         self.pedidos: queue.Queue = queue.Queue()
         self.ligando: set[str] = set()
@@ -235,9 +243,6 @@ class Programa:
         # O celular conectado por ultimo: serial, modelo, bateria (ver
         # `_ler_o_celular`). Vazio ate a primeira sessao subir.
         self.celular: dict = {}
-        # JOGOS que o proprio celular diz que sao jogo (`cmd game`), lidos
-        # junto com a lista de apps e guardados no config (23/set/2026).
-        self.jogos_detectados: set = set(self.config.apps.get("jogos") or [])
         # O vigia dos apps em janela: UM laco no celular para todos.
         self._vigia_trava = threading.Lock()
         self._vigia_alvos: dict = {}
@@ -288,6 +293,22 @@ class Programa:
         self.trocando: set[str] = set()
         self._trocar_em: dict[str, float] = {}
         self._troca_senha: dict[str, object] = {}
+        # (r191) As threads que falam com o adb sobem SO AGORA, com o
+        # objeto inteiro montado (antes subiam no meio do __init__ e o
+        # vigia da conexao podia ler `adb_pausado`/`_sair` antes de
+        # existirem e morrer na largada -- achado no teste de fumaca).
+        # O servidor do ADB acorda agora, e nao no primeiro clique (ver
+        # `celular.aquecer`).
+        if self.config.instalacao_ok:
+            threading.Thread(target=celular.aquecer,
+                             args=(self.config.adb_exe,), daemon=True,
+                             name="aquecer-adb").start()
+            # (r161) CONEXAO EM TEMPO REAL: o proprio adb avisa cada celular
+            # que entra ou sai (`adb track-devices`).
+            self._garantir_vigia_conexao()
+            # (r141) As opcoes do scrcpy lidas agora, e nao no 1o app.
+            threading.Thread(target=self._scrcpy_aceita, args=("",),
+                             daemon=True, name="ajuda-scrcpy").start()
 
     # -- registro ------------------------------------------------------------
 
@@ -430,28 +451,65 @@ class Programa:
                  "cmd package query-activities --brief "
                  "-a android.intent.action.MAIN "
                  "-c android.intent.category.LAUNCHER; "
-                 "echo \"@fab $(getprop ro.product.manufacturer)\""],
+                 "echo \"@fab $(getprop ro.product.manufacturer)\"; "
+                 # (r186) os apps com icone de cada OUTRO usuario (copias)
+                 "pm list users 2>/dev/null | grep 'UserInfo{' | "
+                 "while read -r l; do u=${l#*UserInfo\\{}; u=${u%%:*}; "
+                 "[ \"$u\" = 0 ] && continue; echo \"@user $u $l\"; "
+                 "cmd package query-activities --brief --user $u "
+                 "-a android.intent.action.MAIN "
+                 "-c android.intent.category.LAUNCHER </dev/null 2>/dev/null; done"],
                 capture_output=True, timeout=15,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             linhas_r = (r.stdout or b"").decode("utf-8", "replace") \
                 .splitlines()
             fabricante = next((l[5:].strip().lower() for l in linhas_r
                                if l.startswith("@fab ")), "")
-            com_icone = {l.strip().split("/")[0] for l in linhas_r
-                         if "/" in l and not l.startswith("@fab")}
+            com_icone = set()
+            copias: dict = {}               # usuario -> {pacotes}
+            usuario = 0
+            for l in linhas_r:
+                l = l.strip()
+                if l.startswith("@user "):
+                    partes = l.split(None, 2)
+                    usuario = int(partes[1]) if partes[1].isdigit() else -1
+                    nome_u = (partes[2] if len(partes) > 2 else "").lower()
+                    if usuario > 0 and not any(x in nome_u
+                                               for x in USUARIO_FORA):
+                        copias[usuario] = set()
+                    else:
+                        usuario = -1        # fora (Pasta Segura etc.)
+                    continue
+                if "/" not in l or " " in l or l.startswith("@"):
+                    continue
+                if usuario == 0:
+                    com_icone.add(l.split("/")[0])
+                elif usuario > 0:
+                    copias[usuario].add(l.split("/")[0])
             if len(com_icone) >= 5:
                 antes = len(apps)
                 apps = [a for a in apps if a[1] in com_icone]
                 self.anotar("apps: %d com icone no celular (de %d)"
                             % (len(apps), antes))
+            # (r186) CADA COPIA vira "Nome (2)", "Nome (3)"... logo abaixo
+            # do original, com a chave "<pacote>@<usuario>".
+            n_copias = 0
+            for u in sorted(copias):
+                for nome_a, pac, sist in list(apps):
+                    if COPIA in pac or pac not in copias[u]:
+                        continue
+                    ja = sum(1 for a in apps if a[1].startswith(pac + COPIA))
+                    apps.append(("%s (%d)" % (nome_a, ja + 2),
+                                 "%s%s%d" % (pac, COPIA, u), sist))
+                    n_copias += 1
+            if copias:
+                apps.sort(key=lambda a: a[0].lower())
+                self.anotar("apps: %d copias (usuarios %s)" % (
+                    n_copias, ", ".join(str(u) for u in sorted(copias))))
         except Exception as erro:
             self.anotar("apps: nao filtrei pelos icones (%s)" % erro)
-        # (r177) EM SEGUNDO PLANO: perguntar app por app se e jogo levava
-        # ~12 s e segurava a lista e os icones. A lista aparece ja; a marca
-        # de jogo chega quando terminar.
-        threading.Thread(target=self._detectar_jogos,
-                         args=(alvo, [a[1] for a in apps]), daemon=True,
-                         name="jogos").start()
+        # (r185) Sem a deteccao de jogos (`cmd game`): com o "automatico"
+        # fora, o formato e so o que ele escolhe (celular de padrao).
         # Samsung: o DeX entra na lista como se fosse um app.
         if "samsung" in fabricante:
             apps.insert(0, ("Samsung DeX", DEX, False))
@@ -462,55 +520,6 @@ class Programa:
             self.anotar("apps: lista vazia; fim da saida: %s" % " / ".join(linhas))
             return [], "o celular não respondeu com a lista de apps."
         return apps, ""
-
-    def _detectar_jogos(self, alvo: str, pacotes: list) -> None:
-        """
-        JOGO DETECTADO (sonda_jogos, 23/set/2026): no Android 12+ o
-        `cmd game list-modes <app>` responde "current mode" so para app
-        declarado como jogo; para o resto diz "is not of game type". Um adb
-        shell so para todos. Jogo abre no formato do monitor (ver
-        `_partida_app`); ele pode desmarcar um que nao e.
-        """
-        import re
-        import subprocess
-        pacotes = [p for p in pacotes if re.fullmatch(r"[A-Za-z0-9._]+", p)]
-        if not pacotes:
-            return
-        # (r177) 4 filas ao mesmo tempo no celular (antes uma so, app por
-        # app): ~4x mais rapido. `&` e `wait` existem em qualquer shell de
-        # Android.
-        filas = [pacotes[i::4] for i in range(4) if pacotes[i::4]]
-        laco = " ".join(
-            "(for p in %s; do cmd game list-modes $p 2>/dev/null | "
-            "grep -q 'current mode' && echo $p; done) &" % " ".join(f)
-            for f in filas) + " wait"
-        try:
-            r = subprocess.run([str(self.config.adb_exe), "-s", alvo, "shell",
-                                laco], capture_output=True, timeout=90,
-                               creationflags=getattr(subprocess,
-                                                     "CREATE_NO_WINDOW", 0))
-        except Exception as erro:
-            self.anotar("jogos: nao consegui perguntar (%s)" % erro)
-            return
-        validos = set(pacotes)
-        jogos = sorted({l.strip() for l in (r.stdout or b"").decode(
-            "utf-8", "replace").splitlines() if l.strip() in validos})
-        self.jogos_detectados = set(jogos)
-        self.anotar("jogos: %d detectados (%s)" % (len(jogos),
-                                                  ", ".join(jogos)[:300]))
-        if jogos != (self.config.apps.get("jogos") or []):
-            if jogos:
-                self.config.apps["jogos"] = jogos
-            else:
-                self.config.apps.pop("jogos", None)
-            self.config.gravar()
-
-    def e_jogo(self, pacote: str) -> bool:
-        """Marcado por ele (sim ou nao) ganha; senao, o que o celular diz."""
-        marcado = self.config.app(pacote).get("jogo")
-        if marcado is not None:
-            return bool(marcado)
-        return pacote in self.jogos_detectados
 
     def apps_abertos(self) -> set:
         """Pacotes com janela no ar ou subindo."""
@@ -677,6 +686,7 @@ class Programa:
     def _tarefa_na_tela(self, serial: str, tela: str, pacote: str) -> str:
         """O numero da tarefa do app na tela virtual `tela`, pelo dumpsys."""
         import re
+        pacote = separar_app(pacote)[0]                     # (r186)
         texto = self._shell(serial, "dumpsys activity activities", espera=8)
         dentro = False
         for linha in texto.splitlines():
@@ -929,7 +939,8 @@ class Programa:
         "if [ $n = 3 ]; then dumpsys activity activities > $f 2>/dev/null; "
         "d=1; echo \"vivo $([ $s = 1 ] && echo leve || echo pesado) "
         "$(grep '^Display #' $f | tr '\\n' ' ' | cut -c1-150)\"; fi; "
-        "for p in %s; do t=${p%%=*}; c=${p#*=}; k=${c%%/*}; "
+        "for p in %s; do t=${p%%%%=*}; c=${p#*=}; u=${c%%=*}; c=${c#*=}; "
+        "k=${c%%/*}; "
         "if [ $s = 1 ]; then l=$(printf '%%s\\n' \"$M\" | "
         "grep \"@D$t\\$\" | grep -m1 \": $k/\"); "
         "case \"$l\" in *visible=true*) continue;; "
@@ -941,7 +952,7 @@ class Programa:
         "l=$(printf '%%s\\n' \"$b\" | grep -m1 \"Task{.*$k\"); "
         "case \"$l\" in *visible=true*) continue;; "
         "?*) echo \"escondido $t\"; continue;; esac; "
-        "am start -f 0x10000 --display $t -n $c >/dev/null 2>&1; "
+        "am start --user $u -f 0x10000 --display $t -n $c >/dev/null 2>&1; "
         "echo \"reaberto $t $l\" | cut -c1-160; done; "
         "sleep %s; done")
     # (r110) Acordar o celular SAIU daqui: agora e o vigia do sono, que
@@ -972,11 +983,8 @@ class Programa:
         if not tela:
             self.anotar("manter no app %s: nao achei o numero da tela" % pacote)
             return
-        componente = self._shell(serial, "cmd package resolve-activity "
-                                         "--brief %s | tail -1" % pacote)
-        componente = (componente.strip().splitlines()[-1:] or [""])[0].strip()
-        if not re.fullmatch(r"[A-Za-z0-9._$/]+", componente) or \
-                "/" not in componente:
+        componente = self._componente(serial, pacote)       # (r186)
+        if not componente:
             self.anotar("manter no app %s: sem a tela de entrada (%r)"
                         % (pacote, componente))
             return
@@ -1030,8 +1038,9 @@ class Programa:
             alvos = dict(self._vigia_alvos)
             if not alvos or self._sair:
                 return
-            pares = " ".join("'%s=%s'" % (tela, comp)
-                             for tela, comp in alvos.values())
+            # (r186) "tela=usuario=entrada": a copia reabre no usuario dela.
+            pares = " ".join("'%s=%d=%s'" % (tela, separar_app(pac)[1], comp)
+                             for pac, (tela, comp) in alvos.items())
             laco = self.LACO_DA_VIGIA % (pares, self.VIGIA_A_CADA_S)
             try:
                 proc = subprocess.Popen(
@@ -1794,7 +1803,9 @@ class Programa:
                 "cat /sys/kernel/gpu/gpu_busy 2>/dev/null; echo @f; "
                 "i=$((i+1)); sleep %s; done"
                 % (self.STATUS_LENTO_VOLTAS, passo))
-        topo = "top -b -d %s -m %d -s 1 -o %%CPU,RES,NAME" % (
+        # (r188) + USER: o WhatsApp e a copia dele tem o mesmo nome de
+        # processo; o usuario (u0_a524 x u95_a524) separa os dois.
+        topo = "top -b -d %s -m %d -s 1 -o %%CPU,RES,USER,NAME" % (
             passo, self.STATUS_TOP_LINHAS)
         sem_janela = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         procs = []
@@ -1916,6 +1927,7 @@ class Programa:
         import re
         from collections import deque
         _re_cpu = re.compile(r"(\d+)%cpu\b")
+        _re_usuario = re.compile(r"u(\d+)_")
         linhas: list = []
         nas_linhas = False
         # Ultimas leituras dentro de STATUS_MEDIA_S: (instante, {nome: cpu}).
@@ -1955,15 +1967,21 @@ class Programa:
                 continue
             if not nas_linhas:
                 continue
-            campos = linha.split(None, 2)
-            if len(campos) < 3:
+            campos = linha.split(None, 3)
+            if len(campos) < 4:
                 continue
             try:
                 cpu = float(campos[0])
             except ValueError:
                 continue
             cpu = cpu / getattr(self, "_nucleos", 1)
-            nome, ram = campos[2].strip(), campos[1]
+            nome, ram = campos[3].strip(), campos[1]
+            # (r188) Processo da COPIA (usuario > 0): "pacote@u[:resto]",
+            # a mesma chave da lista de apps (nome e icone de la).
+            m = _re_usuario.match(campos[2])
+            if m and int(m.group(1)) > 0:
+                base, dois, resto = nome.partition(":")
+                nome = "%s%s%s%s%s" % (base, COPIA, m.group(1), dois, resto)
             # Fora: tarefas do nucleo do Android ("[u16:4-memlat_wq]", sem
             # memoria propria) e os comandos do proprio medidor.
             if nome.startswith("[") or nome.endswith("]") or \
@@ -1980,15 +1998,30 @@ class Programa:
         """
         import re
         alvo = self._serial_conhecido()                       # (r149)
+        chave = pacote
+        pacote, usuario = separar_app(chave)
         if not alvo or not re.fullmatch(r"[A-Za-z0-9._]+", pacote):
             return {}
-        texto = self._shell(alvo, (
-            "p=$(pidof %s); [ -z \"$p\" ] && echo @parado && exit; "
+        # (r186) SO os processos do USUARIO do app (o original e a copia
+        # tem o mesmo nome; o UID diz de quem e: usuario x 100000 + app).
+        # Sem o `ps`, o original cai no `pidof` de antes; a copia, nao.
+        if usuario:
+            uid = "%d[0-9]{5}" % usuario
+        else:
+            uid = "[0-9]{1,5}"
+        escolher = (
+            "p=$(ps -A -o PID=,UID=,NAME= 2>/dev/null | grep -E "
+            "'^ *[0-9]+ +%s +%s$' | sed 's/^ *\\([0-9]*\\).*/\\1/'); "
+            "p=$(echo $p); " % (uid, pacote.replace(".", "\\.")))
+        if not usuario:
+            escolher += "[ -z \"$p\" ] && p=$(pidof %s); " % pacote
+        texto = self._shell(alvo, escolher + (
+            "[ -z \"$p\" ] && echo @parado && exit; "
             "echo @n $(nproc 2>/dev/null); "
             "echo @pid $p; top -b -n 2 -d 0.6 -p $(echo $p | tr ' ' ',') "
-            "-o PID,%%CPU,RES 2>/dev/null | tail -n $(echo $p | wc -w); "
+            "-o PID,%CPU,RES 2>/dev/null | tail -n $(echo $p | wc -w); "
             "echo @gpu; dumpsys gpu 2>/dev/null | grep -E \"Proc ($(echo $p | "
-            "tr ' ' '|')) total\"") % pacote, espera=15)
+            "tr ' ' '|')) total\""), espera=15)
         if "@parado" in texto:
             return {"parado": True}
         uso = {"cpu": 0.0, "ram": 0, "video": 0}
@@ -2075,8 +2108,15 @@ class Programa:
 
     def _assinatura(self, serial: str) -> dict:
         """{pacote: versao} de tudo que esta instalado (leve: ~0,3 s)."""
+        # (r186) + os pacotes de cada outro usuario, como "<pacote>@<u>":
+        # copia nova/removida muda a assinatura e a lista se refaz sozinha.
         saida = self._shell(serial, "pm list packages --show-versioncode "
-                            "2>/dev/null || pm list packages", espera=15)
+                            "2>/dev/null || pm list packages; "
+                            "for u in $(pm list users 2>/dev/null | sed -n "
+                            "'s/.*UserInfo{\\([0-9]*\\):.*/\\1/p'); do "
+                            "[ \"$u\" = 0 ] || pm list packages --user $u "
+                            "2>/dev/null | sed \"s/^package:\\([^ ]*\\).*"
+                            "/package:\\1@$u/\"; done", espera=15)
         pacotes = {}
         for linha in saida.splitlines():
             linha = linha.strip()
@@ -2194,17 +2234,69 @@ class Programa:
         programinha de `android\\`, rodando la como o servidor do scrcpy) e
         guarda cada um como PNG em `icones\\`. Devolve quantos chegaram.
         """
-        import base64
         import re
-        import subprocess
         # DeX sem icone (r164, 25/set/2026): "__dex__" nao e pacote, entao
         # ficava so a letra. Agora: desenha um reserva na hora e pede ao
         # celular o icone do app do DeX, que por cima substitui o desenho.
         quer_dex = DEX in pacotes
         if quer_dex:
             self._desenhar_icone_dex()
-        pacotes = [p for p in pacotes if p != DEX
-                   and re.fullmatch(r"[A-Za-z0-9._]+", p)]
+        # (r186) A copia usa o icone do original com um numero no canto:
+        # pede o do original (se faltar) e desenha no fim.
+        copias = [p for p in pacotes if COPIA in p]
+        pasta_i = self.pasta_de_icones()
+        pacotes = list(pacotes) + [
+            separar_app(c)[0] for c in copias
+            if not (pasta_i / (separar_app(c)[0] + ".png")).exists()]
+        pacotes = list(dict.fromkeys(
+            p for p in pacotes if p != DEX
+            and re.fullmatch(r"[A-Za-z0-9._]+", p)))
+        if copias:
+            try:
+                return self._buscar_icones_de_pacotes(
+                    pacotes, quer_dex) + self._icones_das_copias(copias)
+            except Exception as erro:
+                self.anotar("icones: copias falharam (%s)" % erro)
+                return 0
+        return self._buscar_icones_de_pacotes(pacotes, quer_dex)
+
+    def _icones_das_copias(self, copias) -> int:
+        """(r186) icone do original + o numero da copia num circulo."""
+        from PIL import Image, ImageDraw, ImageFont
+        pasta = self.pasta_de_icones()
+        feitos = 0
+        nomes = {a[1]: a[0] for a in (getattr(self, "apps_do_celular", None)
+                                      or [])}
+        for chave in copias:
+            base = pasta / (separar_app(chave)[0] + ".png")
+            if not base.exists():
+                continue
+            import re as _re
+            m = _re.search(r"\((\d+)\)\s*$", nomes.get(chave, ""))
+            numero = m.group(1) if m else "2"
+            img = Image.open(base).convert("RGBA").resize((96, 96))
+            d = ImageDraw.Draw(img)
+            r = 20
+            d.ellipse((96 - 2 * r - 1, 96 - 2 * r - 1, 95, 95),
+                      fill=(225, 93, 255, 255), outline=(20, 20, 24, 255),
+                      width=3)
+            try:
+                fonte = ImageFont.truetype("arialbd.ttf", 26)
+            except Exception:
+                fonte = ImageFont.load_default()
+            try:
+                d.text((96 - r - 1, 96 - r - 1), numero,
+                       fill=(255, 255, 255, 255), font=fonte, anchor="mm")
+            except Exception:       # fonte sem ancora (Pillow velho)
+                d.text((96 - r - 6, 96 - r - 8), numero,
+                       fill=(255, 255, 255, 255), font=fonte)
+            img.save(pasta / (chave + ".png"))
+            feitos += 1
+        return feitos
+
+    def _buscar_icones_de_pacotes(self, pacotes, quer_dex) -> int:
+        import base64
+        import subprocess
         if quer_dex and ICONE_DEX not in pacotes:
             pacotes.append(ICONE_DEX)
         if not pacotes or not self.config.instalacao_ok:
@@ -2312,12 +2404,14 @@ class Programa:
             from . import qualidade
             import copy
             audio_q = None
+            video_p = None
             if deste.get("predef"):
                 video_p, audio_q = qualidade.valores_da_predef(
                     self.config.qualidade, deste["predef"])
                 qualidade.aplicar_no_perfil(perfil, video_p, None)
             for campo, valor in (deste.get("video_fino") or {}).items():
                 qualidade.escrever(perfil, "video", campo, valor)
+            self._resolucao_no_perfil(perfil)               # (r189)
             # ONDE O SOM TOCA: o do app, senao o de APPS > ajustes; de
             # fabrica o som fica no celular (varias janelas nao dividem o
             # som, que e do celular inteiro).
@@ -2399,34 +2493,19 @@ class Programa:
                 if POLITICA_TECLADO and \
                         self._scrcpy_aceita("--display-ime-policy"):
                     extras.append("--display-ime-policy=" + POLITICA_TECLADO)
-                if not troca:
+                if not troca and COPIA not in pacote:
                     extras.append("--start-app=%s" % pacote)
-                # TELA DO APP NO TAMANHO DO MONITOR (pedido dele, 23/set/2026:
-                # "o jogo inicia na resolucao e formato da tela do pc"): a
-                # tela virtual nasce com a resolucao do monitor principal
-                # (16:9 1080/1440/2160...), e nao com a do celular. Vale o do
-                # app (APPS > personalizados), senao o de APPS > ajustes.
-                # JOGO (23/set/2026): marcado por ele (APPS > menu do app ou
-                # personalizados) abre no formato do monitor, a menos que o
-                # app tenha a tela escolhida a mao.
-                jogo = self.e_jogo(pacote)
-                tela = deste.get("tela") or ("pc" if jogo else None) or \
-                    self.config.apps.get("tela") or "celular"
-                if tela == "pc":
-                    from . import monitores
-                    lista = monitores.listar(estrito=True)
-                    m = next((x for x in lista if x.get("principal")),
-                             lista[0] if lista else None)
-                    if m and m["l"] > 0 and m["a"] > 0:
-                        extras[0] = "--new-display=%dx%d" % (m["l"], m["a"])
-                        # E A IMAGEM NA RESOLUCAO DO MONITOR (pedido dele,
-                        # 23/set/2026): a "resolucao" da qualidade nao corta
-                        # o jogo -- vai inteiro (se o celular nao der conta,
-                        # o proprio scrcpy desce o tamanho sozinho).
+                # (r184) FORMATO E RESOLUCAO DO APP (formatos.py; antes: o
+                # "modo jogo" seguia o monitor a risca).
+                tamanho = self._tela_do_app(pacote, deste)
+                if tamanho:
+                    extras[0] = tamanho["opcao"]
+                    if tamanho.get("lado"):
+                        # A imagem vai inteira, no tamanho da tela virtual
+                        # (a "resolucao" geral da qualidade nao corta).
                         perfil.setdefault("video", {})["resolucao_max"] = \
-                            max(m["l"], m["a"])
-                        self.anotar("app %s: tela virtual %dx%d (monitor)"
-                                    % (pacote, m["l"], m["a"]))
+                            tamanho["lado"]
+                    self.anotar("app %s: %s" % (pacote, tamanho["nota"]))
             # REABRIR NO MESMO LUGAR (r123): posicao e ALTURA da janela velha;
             # a largura o scrcpy tira do formato da imagem -- o ajuste novo
             # pode ter trocado o formato (tela do celular x do monitor).
@@ -2466,6 +2545,12 @@ class Programa:
             if troca:
                 return sessao
             self.pedidos.put(("subiu", nome, sessao))
+            if COPIA in pacote:
+                # (r186) A copia: o --start-app nao escolhe usuario; a tela
+                # virtual sobe vazia e o app entra nela pelo `am start`.
+                threading.Thread(target=self._abrir_copia,
+                                 args=(alvo, pacote, sessao), daemon=True,
+                                 name="copia-%s" % pacote).start()
             self._garantir_vigia_sono(alvo)
             self._garantir_vigia_foco(alvo)
         except Exception as erro:
@@ -2473,6 +2558,109 @@ class Programa:
             if troca:
                 return None
             self.pedidos.put(("falhou", nome, "Falha inesperada: %s" % erro))
+
+    def _tela_do_app(self, pacote: str, deste: dict):
+        """
+        (r184) A tela virtual do app: {"opcao": "--new-display=...",
+        "lado": lado maior ou 0, "nota": para o registro}. None = a de
+        sempre (tamanho do celular).
+        """
+        from . import formatos
+        cel = self.celular or {}
+        formato = deste.get("formato") or self.config.apps.get("formato") \
+            or formatos.PADRAO
+        try:
+            p = int(deste.get("resolucao") or 0)
+        except (TypeError, ValueError):
+            p = 0
+        if formatos.e_celular(formato) and not p:
+            return None                       # como sempre foi
+        possiveis = formatos.possiveis(formato, cel)
+        if not p:
+            # Resolucao "celular": a da tela do aparelho (lado curto), ou a
+            # maior abaixo dela que o celular aguenta nesse formato.
+            t = formatos.tela_do_celular(cel)
+            teto = t[0] if t else 1080
+            p = next((x for x in possiveis if x <= teto), possiveis[-1])
+        elif p not in possiveis:
+            menor = next((x for x in possiveis if x <= p), possiveis[-1])
+            self.anotar("app %s: %dp nao cabe no celular; vai %dp"
+                        % (pacote, p, menor))
+            p = menor
+        t = formatos.tamanho(formato, p, cel)
+        if not t:
+            return None
+        dpi = formatos.densidade(p, cel)
+        return {"opcao": "--new-display=%dx%d%s" % (
+                    t[0], t[1], "/%d" % dpi if dpi else ""),
+                "lado": max(t),
+                "nota": "tela virtual %dx%d (%s %dp)" % (
+                    t[0], t[1], formatos.rotulo(formato), p)}
+
+    def _resolucao_no_perfil(self, perfil: dict) -> None:
+        """(r189) A resolucao em "p" da qualidade vira o --max-size (lado
+        maior) com a proporcao do celular. Sempre por cima do que o perfil
+        guardar (perfis antigos ainda tem "resolucao_max" solto)."""
+        from . import qualidade
+        video = perfil.setdefault("video", {})
+        if "resolucao" in video:
+            video["resolucao_max"] = qualidade.lado_maior(
+                video.get("resolucao"), self.celular)
+
+    def _migrar_formatos(self) -> None:
+        """(r184) Marcas de jogo / tela do monitor viram formato, 1 vez."""
+        try:
+            from . import formatos, monitores
+            lista = monitores.listar(estrito=True)
+            m = next((x for x in lista if x.get("principal")),
+                     lista[0] if lista else None)
+            fmt = formatos.do_monitor(m["l"], m["a"]) if m and m["a"] > 0 \
+                else "16:9"
+            mudou = formatos.migrar(self.config.apps, fmt)
+            # (r189) qualidade em "p"; a fixa "nitido" virou "celular".
+            from . import qualidade
+            if qualidade.migrar(self.config.qualidade, self.config.apps):
+                mudou = True
+                for perfil in self.config.perfis.values():
+                    if isinstance(perfil, dict) and \
+                            perfil.get("predef") == "nitido":
+                        perfil["predef"] = "celular"
+            if mudou:
+                self.config.gravar()
+                log.info("formatos/qualidade: marcas antigas convertidas "
+                         "(%s)", fmt)
+        except Exception:
+            log.exception("formatos: conversao falhou")
+
+    def _componente(self, serial: str, chave: str) -> str:
+        """A tela de entrada do app (do usuario dele), ou ""."""
+        import re
+        pacote, usuario = separar_app(chave)
+        comp = self._shell(serial, "cmd package resolve-activity --brief "
+                           "--user %d %s | tail -1" % (usuario, pacote))
+        comp = (comp.strip().splitlines()[-1:] or [""])[0].strip()
+        if not re.fullmatch(r"[A-Za-z0-9._$/]+", comp) or "/" not in comp:
+            return ""
+        return comp
+
+    def _abrir_copia(self, serial: str, chave: str, sessao) -> None:
+        """(r186) Poe a copia na tela virtual da janela dela."""
+        pacote, usuario = separar_app(chave)
+        tela = None
+        fim = time.monotonic() + 20
+        while not tela and time.monotonic() < fim and sessao.rodando:
+            tela = (self._tela_da_sessao(sessao) or (None,))[0]
+            if not tela:
+                time.sleep(0.1)
+        comp = self._componente(serial, chave) if tela else ""
+        if not tela or not comp:
+            self.anotar("copia %s: nao abri (tela %s, entrada %r)"
+                        % (chave, tela, comp))
+            return
+        resp = self._shell(serial, "am start --user %d --display %s -n %s"
+                           % (usuario, tela, comp), espera=8).strip()
+        self.anotar("copia %s: aberta na tela %s (%s)"
+                    % (chave, tela, resp[:120]))
 
     def _serial_conhecido(self) -> str:
         """(r149) O celular ja lido (sem gastar um `adb devices`); sem ele,
@@ -2891,6 +3079,7 @@ class Programa:
         if perfil.get("predef"):
             video_p, audio_p = qualidade.valores_da_predef(q, perfil["predef"])
             qualidade.aplicar_no_perfil(perfil, video_p, audio_p)
+        self._resolucao_no_perfil(perfil)                   # (r189)
         if nome != "jogo":
             return perfil
         conteudo = conteudo_do(perfil)
@@ -3061,10 +3250,36 @@ class Programa:
                     "echo r=$(getprop ro.build.version.release); "
                     "echo i=$(getprop ro.serialno); "
                     "dumpsys battery | grep -E "
-                    "'^ *(level|AC powered|USB powered):'", tempo=6)
+                    "'^ *(level|AC powered|USB powered):'; "
+                    # (r184) tela e densidade de verdade, e o maior tamanho
+                    # que o codificador de video transmite (formatos.py).
+                    "wm size; wm density; echo @codecs; "
+                    "grep -h -E '<MediaCodec |<Type |<Limit name=\"size\"|"
+                    "</MediaCodec' /vendor/etc/media_codecs*.xml "
+                    "/odm/etc/media_codecs*.xml /system/etc/media_codecs*.xml "
+                    "2>/dev/null", tempo=8)
                 import re as _re
-                for linha in saida.stdout.decode("utf-8",
-                                                 "replace").splitlines():
+                from . import formatos
+                texto = saida.stdout.decode("utf-8", "replace")
+                texto, _, codecs = texto.partition("@codecs")
+                tam = {}
+                for linha in texto.splitlines():
+                    m = _re.match(r"\s*(Physical|Override) (size|density):"
+                                  r"\s*(\d+)(?:x(\d+))?", linha)
+                    if m:
+                        tam[(m.group(1), m.group(2))] = m.groups()[2:]
+                tela = tam.get(("Override", "size")) or \
+                    tam.get(("Physical", "size"))
+                if tela and tela[1]:
+                    info["tela_cel"] = (int(tela[0]), int(tela[1]))
+                dens = tam.get(("Override", "density")) or \
+                    tam.get(("Physical", "density"))
+                if dens:
+                    info["dpi"] = int(dens[0])
+                lim = formatos.ler_limite_do_codificador(codecs)
+                if lim:
+                    info["limite_video"] = lim
+                for linha in texto.splitlines():
                     linha = linha.strip()
                     chave, _, valor = linha.partition("=")
                     valor = valor.strip()

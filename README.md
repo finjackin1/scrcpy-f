@@ -13,7 +13,7 @@ numa janela própria do Windows.
 2. Na primeira vez a janela abre em **Opções**: clique em **instalar** e o
    programa baixa o scrcpy mais novo sozinho (o Windows pede permissão de
    administrador). Já tem o scrcpy? Use **usar outra pasta**. Até o scrcpy
-   existir, só **Opções** fica liberada.
+   existir, só **Opções › geral** fica liberada.
 3. No celular, ligue a **Depuração sem fio** (Opções do desenvolvedor), deixe
    na mesma rede Wi-Fi do PC e conecte em **Parear** — procurando, pelo cabo
    USB ou com código.
@@ -35,15 +35,26 @@ recurso não existe na versão dele, em vez de quebrar.
 | **Apps** | cada app do celular numa janela própria do Windows, com o ícone e o nome do app e um botão separado na barra de tarefas. O celular continua livre na sua mão |
 | **Status** | bateria, temperatura, memória e o que mais pesa no celular |
 | **Parear** | conectar o celular. O quadradinho fica verde com ele conectado — em tempo real: desligou a depuração ou saiu da rede, o programa percebe |
-| **Opções** | notificações, abrir com o Windows, página inicial, pasta do scrcpy e atualizações; atalhos de teclado; qualidade de imagem e som (3 predefinições e até 3 suas) |
+| **Opções** | notificações, abrir com o Windows, página inicial, pasta do scrcpy e atualizações; atalhos de teclado; qualidade de imagem e som (predefinições **leve**, **equilibrado** e **celular**, e até 3 suas; resolução em 480p/720p/1080p/1440p ou a do celular) |
 
 Tudo é gravado no instante do clique, sem botão de salvar.
 
 ### Apps em janela própria
 
 - **Clique** abre o app (ou traz a janela dele para a frente); **botão
-  direito** ajusta só aquele app: qualidade, teclado do celular, abrir em tela
-  cheia, fechar o app no celular quando a janela fecha.
+  direito** abre em tela cheia, cria o atalho e leva às **configurações
+  personalizadas** daquele app, separadas em **vídeo**, **áudio** e
+  **outros**:
+  - **formato** da janela: celular (em pé, como no aparelho), 4:3, 16:9 ou
+    21:9 — jogo costuma pedir 16:9;
+  - **resolução**: a do celular ou de 480p a 2160p — só aparecem as que o
+    celular consegue transmitir naquele formato;
+  - qualidade de imagem e som, onde o som toca, teclado do celular e fechar
+    o app no celular quando a janela fecha.
+- **Apps duplicados** (Dual Messenger do Samsung, "apps duplos" do Xiaomi,
+  perfil de trabalho...) aparecem duas vezes — "WhatsApp" e "WhatsApp (2)",
+  com um número no ícone — e cada um abre na sua janela, com ajustes e
+  atalho próprios. A Pasta Segura do Samsung fica de fora.
 - **Atalho na área de trabalho** de cada app: dois cliques abrem o app direto,
   mesmo com o scrcpy-f fechado (e avisa se o celular não estiver conectado).
 - **Samsung DeX** aparece no topo da lista em celulares Samsung: a área de

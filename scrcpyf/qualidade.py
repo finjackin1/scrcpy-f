@@ -25,9 +25,10 @@ guardando qual foi clicado. Assim nao existe estado escondido para mentir.
 
 O "PADRAO" E O DE FABRICA
 --------------------------
-O nivel "Padrao" de imagem e o mesmo do `PERFIL_BASE` do config: h264,
-8 Mb/s, 60 quadros, 1280, sem atraso (ate 19/set/2026 era 16 Mb/s na
-resolucao do celular -- saiu quando as fileiras desceram).
+(r189) Predefinicoes: leve (480p), equilibrado (720p) e celular (a
+resolucao e o formato exatos do aparelho). A resolucao e em "p" (altura da
+tela deitada = o lado curto), como nos apps; o --max-size (lado maior) sai
+de `lado_maior` com a proporcao do celular.
 """
 
 from __future__ import annotations
@@ -44,8 +45,9 @@ CODEC_VIDEO = [("h264", "H.264"), ("h265", "H.265")]
 TAXA_VIDEO = [("2M", "2"), ("4M", "4"), ("8M", "8"), ("16M", "16"),
               ("24M", "24")]
 QUADROS = [(30, "30"), (60, "60"), (90, "90"), (120, "120")]
-RESOLUCAO = [(1600, "1600"), (1280, "1280"), (1024, "1024"),
-             (800, "800"), (720, "720")]
+# (r189) Em "p" (lado curto). 0 = "celular": a do aparelho, sem cortar.
+RESOLUCAO = [(0, "celular"), (1440, "1440p"), (1080, "1080p"),
+             (720, "720p"), (480, "480p")]
 ATRASO_VIDEO = [(0, "0"), (20, "20"), (50, "50"), (100, "100")]
 
 # Som
@@ -81,8 +83,8 @@ AJUSTES_VIDEO = [
      "dica": "Mb/s  ·  mais = mais nítido", "opcoes": TAXA_VIDEO},
     {"secao": "video", "campo": "fps_max", "nome": "Quadros por segundo",
      "dica": "limite, não garantia", "opcoes": QUADROS},
-    {"secao": "video", "campo": "resolucao_max", "nome": "Resolução",
-     "dica": "lado maior, em pixels", "opcoes": RESOLUCAO},
+    {"secao": "video", "campo": "resolucao", "nome": "Resolução",
+     "dica": "celular = a do aparelho", "opcoes": RESOLUCAO},
     {"secao": "video", "campo": "buffer_ms", "nome": "Atraso da imagem",
      "dica": "ms  ·  sobe se picotar", "opcoes": ATRASO_VIDEO},
 ]
@@ -106,15 +108,18 @@ AJUSTES_AUDIO = [
 NIVEIS_VIDEO = [
     # "Leve" = o ajuste DELE para jogar (19/set/2026): menor atraso e sem
     # travar, nitidez por ultimo. Antes era 30 quadros/1280/50 ms.
-    ("leve", "Leve", "Menor atraso, sem travar. Imagem mais simples.",
+    # (r189, pedido dele) leve / equilibrado / celular.
+    ("leve", "Leve", "Menor atraso, sem travar. Imagem em 480p.",
      {"codec": "h264", "bitrate": "4M", "fps_max": 60,
-      "resolucao_max": 1024, "buffer_ms": 0}),
-    ("padrao", "Padrão", "Resposta rápida, imagem melhor. Pede Wi-Fi bom.",
+      "resolucao": 480, "buffer_ms": 0}),
+    ("padrao", "Equilibrado", "Resposta rápida, imagem em 720p. Pede Wi-Fi "
+     "bom.",
      {"codec": "h264", "bitrate": "8M", "fps_max": 60,
-      "resolucao_max": 1280, "buffer_ms": 0}),
-    ("nitido", "Nítido", "Imagem mais limpa, com um pouco mais de atraso.",
-     {"codec": "h265", "bitrate": "24M", "fps_max": 60,
-      "resolucao_max": 1600, "buffer_ms": 20}),
+      "resolucao": 720, "buffer_ms": 0}),
+    ("celular", "Celular", "A resolução e o formato exatos do celular. Pede "
+     "Wi-Fi bom.",
+     {"codec": "h264", "bitrate": "16M", "fps_max": 60,
+      "resolucao": 0, "buffer_ms": 0}),
 ]
 
 NIVEIS_AUDIO = [
@@ -234,7 +239,7 @@ def _mesmo(a, b) -> bool:
 # escolhida grava nela; com uma fixa escolhida, `escolhida` vira None e a
 # tela oferece "salvar como predefinicao".
 
-CAMPOS_VIDEO = ["codec", "bitrate", "fps_max", "resolucao_max", "buffer_ms"]
+CAMPOS_VIDEO = ["codec", "bitrate", "fps_max", "resolucao", "buffer_ms"]
 CAMPOS_AUDIO = ["codec", "bitrate", "buffer_ms"]
 MAX_MINHAS = 3
 
@@ -250,8 +255,8 @@ PREDEF_FIXAS = [
     ("leve", "leve", _nivel(NIVEIS_VIDEO, "leve"), _nivel(NIVEIS_AUDIO, "leve")),
     ("equilibrado", "equilibrado", _nivel(NIVEIS_VIDEO, "padrao"),
      _nivel(NIVEIS_AUDIO, "padrao")),
-    ("nitido", "nítido", _nivel(NIVEIS_VIDEO, "nitido"),
-     _nivel(NIVEIS_AUDIO, "alta")),
+    ("celular", "celular", _nivel(NIVEIS_VIDEO, "celular"),
+     _nivel(NIVEIS_AUDIO, "padrao")),
 ]
 PREDEF_INICIAL = "equilibrado"
 
@@ -339,3 +344,74 @@ def onde_do_perfil(perfil: dict) -> str:
     if not audio.get("ligado", True):
         return "celular"
     return "ambos" if audio.get("duplicar") else "pc"
+
+
+# ============================================================================
+# (r189) RESOLUCAO EM "p"
+# ============================================================================
+
+def _tela(cel):
+    t = (cel or {}).get("tela_cel")
+    if t and len(t) == 2 and min(t) > 0:
+        return min(t), max(t)
+    return None
+
+
+def opcoes_de_resolucao(cel) -> list:
+    """As da fileira: "celular" e so as MENORES que a tela do aparelho
+    (espelhar nao passa da tela; a igual ja e o "celular")."""
+    t = _tela(cel)
+    return [(v, r) for v, r in RESOLUCAO
+            if v == 0 or t is None or v < t[0]]
+
+
+def lado_maior(p, cel) -> int:
+    """O --max-size de "p" no celular: 0 = sem cortar (a do aparelho)."""
+    try:
+        p = int(float(p or 0))
+    except (TypeError, ValueError):
+        p = 0
+    if p <= 0:
+        return 0
+    t = _tela(cel)
+    if t is None:
+        return max(8, int(round(p * 2.0 / 8)) * 8)   # sem o celular lido
+    if p >= t[0]:
+        return 0
+    return max(8, int(round(p * t[1] / float(t[0]) / 8)) * 8)
+
+
+def _p_de_lado(lado) -> int:
+    """Lado maior antigo (1280...) -> o "p" mais perto (proporcao ~2,17)."""
+    try:
+        lado = int(float(lado or 0))
+    except (TypeError, ValueError):
+        return 0
+    if lado <= 0:
+        return 0
+    alvo = lado / 2.17
+    return min((1440, 1080, 720, 480), key=lambda p: abs(p - alvo))
+
+
+def migrar(q: dict, apps: dict) -> bool:
+    """(r189) Uma vez: "resolucao_max" (lado maior) vira "resolucao" (p);
+    a fixa "nitido" saiu -> "celular". True = mudou algo."""
+    if q.get("resolucao_v") == 2:
+        return False
+    fixas = {c: (v, a) for c, _n, v, a in PREDEF_FIXAS}
+    if q.get("escolhida") == "nitido":
+        q["escolhida"] = "celular"
+    esc = q.get("escolhida")
+    if esc in fixas:
+        # Estava numa fixa: fica com a fixa NOVA inteira.
+        q["video"], q["audio"] = dict(fixas[esc][0]), dict(fixas[esc][1])
+    for parte in [q.get("video")] + [m.get("video") for m in
+                                     (q.get("minhas") or [])
+                                     if isinstance(m, dict)]:
+        if isinstance(parte, dict) and "resolucao_max" in parte:
+            parte["resolucao"] = _p_de_lado(parte.pop("resolucao_max"))
+    for conf in ((apps or {}).get("por_app") or {}).values():
+        if isinstance(conf, dict) and conf.get("predef") == "nitido":
+            conf["predef"] = "celular"
+    q["resolucao_v"] = 2
+    return True
