@@ -52,13 +52,20 @@ def main():
         shutil.copy2(RAIZ / "config.json", copia / "config.json")
     anotar("copia pronta: %s" % copia)
 
+    # (r182) O ZIP DE VERDADE do publicar.bat (o mesmo que vai pro GitHub),
+    # so com a marca acrescentada: assim o teste pega problema do formato
+    # do zip (antes o zip era refeito aqui e escondia isso).
+    zips = sorted(PACOTE.parent.glob("scrcpy-f-*.zip"),
+                  key=lambda p: p.stat().st_mtime)
+    if not zips:
+        anotar("FALTA o zip: rode o publicar.bat primeiro")
+        return 1
     zip_ = TESTE / "scrcpy-f-9.9.9.zip"
-    with zipfile.ZipFile(zip_, "w", zipfile.ZIP_DEFLATED) as z:
-        for arq in PACOTE.rglob("*"):
-            if arq.is_file():
-                z.write(arq, Path("scrcpy-f") / arq.relative_to(PACOTE))
+    shutil.copy2(zips[-1], zip_)
+    with zipfile.ZipFile(zip_, "a", zipfile.ZIP_DEFLATED) as z:
         z.writestr("scrcpy-f/MARCA-VERSAO-NOVA.txt",
                    "veio do zip de teste 9.9.9\n")
+    anotar("zip usado: %s" % zips[-1].name)
     soma = hashlib.sha256(zip_.read_bytes()).hexdigest()
     release = {"tag_name": "v9.9.9", "assets": [{
         "name": zip_.name, "size": zip_.stat().st_size,

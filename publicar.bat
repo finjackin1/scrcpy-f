@@ -119,7 +119,9 @@ echo [5/6] Compactando...
 if exist "%ZIP%" del /q "%ZIP%"
 set "ALVO=%PACOTE%"
 set "ALVOZIP=%ZIP%"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Compress-Archive -Path $env:ALVO -DestinationPath $env:ALVOZIP -Force" 2>>"%LOG%"
+rem (r182) Zip feito pelo Python, com "/" nos caminhos: o Compress-Archive
+rem do Windows grava "\" e o tar que o atualizador usa pode nao entender.
+python -c "import os,zipfile;a=os.environ['ALVO'];b=os.path.dirname(a);z=zipfile.ZipFile(os.environ['ALVOZIP'],'w',zipfile.ZIP_DEFLATED);[z.write(os.path.join(r,f),os.path.relpath(os.path.join(r,f),b).replace(os.sep,'/')) for r,_,fs in os.walk(a) for f in fs];z.close()" 2>>"%LOG%"
 if errorlevel 1 (
   echo [ERRO] Nao consegui compactar. A pasta pronta continua em:
   echo        %PACOTE%
