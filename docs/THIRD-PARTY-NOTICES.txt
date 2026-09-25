@@ -1,0 +1,93 @@
+scrcpy-f — Avisos de Terceiros
+==============================
+
+O scrcpy-f utiliza os componentes de terceiros listados abaixo. Cada um
+permanece sob a licenca de seu proprio autor. Este arquivo existe para
+atender aos avisos de atribuicao exigidos por essas licencas.
+
+O scrcpy-f em si e distribuido sob a GNU General Public License v3.0 —
+veja o arquivo LICENSE.
+
+
+1. BIBLIOTECAS PYTHON (instaladas pelo requirements.txt)
+--------------------------------------------------------
+
+O nucleo do scrcpy-f — achar o celular, montar a linha de comando,
+subir e derrubar a sessao — usa so a biblioteca padrao do Python, de
+proposito. As duas bibliotecas abaixo existem por causa do icone da
+bandeja do Windows.
+
+pystray >= 0.19
+  GNU Lesser General Public License v3.0
+  Copyright (c) Moses Palmer
+  https://github.com/moses-palmer/pystray
+
+Pillow >= 10.0
+  MIT-CMU License
+  Copyright (c) Jeffrey A. Clark e contribuidores
+  https://github.com/python-pillow/Pillow
+
+
+2. TEMPO DE EXECUCAO
+--------------------
+
+CPython (inclui o tkinter)
+  Python Software Foundation License Version 2
+  Copyright (c) 2001 Python Software Foundation; All Rights Reserved
+  https://docs.python.org/3/license.html
+
+  Na versao em codigo-fonte, instalado separadamente por quem usa. No
+  pacote publicado (scrcpy-f.exe, feito pelo publicar.bat com o
+  PyInstaller), o interpretador e as bibliotecas acima vao dentro da
+  pasta _internal.
+
+Tcl/Tk (a base do tkinter, vai no pacote)
+  Licenca do Tcl/Tk (estilo BSD)
+  Copyright (c) Regents of the University of California, Sun
+  Microsystems, Inc., Scriptics Corporation e outros
+  https://www.tcl.tk/software/tcltk/license.html
+
+OpenSSL (vai no pacote, pelo modulo ssl do Python)
+  Apache License 2.0
+  Copyright (c) 1998-2025 The OpenSSL Project Authors
+  https://www.openssl.org/source/license.html
+
+  Usado so para baixar o scrcpy e as versoes novas do scrcpy-f do GitHub
+  por https.
+
+
+3. PROGRAMAS EXTERNOS
+----------------------
+
+scrcpy
+  Apache License 2.0
+  Copyright (C) 2018 Genymobile
+  Copyright (C) 2018-2026 Romain Vimont
+  https://github.com/Genymobile/scrcpy
+
+  O scrcpy-f e um envelope em volta do scrcpy: ele chama o executavel
+  como programa externo. Nenhuma parte do scrcpy vai no codigo nem no
+  pacote publicado: o botao "instalar" baixa o zip oficial direto do
+  GitHub da Genymobile, na maquina de quem usa (ou a pessoa aponta a
+  pasta de um scrcpy que ja tem).
+
+adb — Android Debug Bridge (Android SDK Platform Tools)
+  Apache License 2.0
+  Copyright (c) The Android Open Source Project
+  https://developer.android.com/tools/adb
+
+  Acompanha o pacote do scrcpy. Chamado como programa externo, tambem
+  nao redistribuido.
+
+
+4. COMPATIBILIDADE COM A GPLv3
+-------------------------------
+
+A LGPLv3 do pystray e feita para ser usada junto de qualquer licenca,
+inclusive a GPLv3. A licenca do Tcl/Tk e permissiva. A MIT-CMU do Pillow
+e a Apache License 2.0 (OpenSSL, scrcpy, adb) sao
+compativeis com a GPL versao 3 (a Apache 2.0 nao e compativel com a
+versao 2). A PSF License 2 e compativel com a GPL desde o Python 2.2.
+
+Nenhuma das dependencias acima impede a distribuicao do scrcpy-f sob a
+GPLv3.

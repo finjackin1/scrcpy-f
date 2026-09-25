@@ -1,0 +1,3 @@
+# So para PUBLICAR (o publicar.bat instala sozinho se faltar).
+# Congela o programa num executavel que roda sem Python instalado.
+pyinstaller>=6.0

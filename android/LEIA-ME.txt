@@ -1,0 +1,27 @@
+android\ -- o programinha que roda NO CELULAR para devolver os icones dos apps
+===========================================================================
+
+Icones.smali          o codigo-fonte (Dalvik, escrito a mao em smali)
+scrcpyf-icones.jar    o mesmo codigo montado (classes.dex dentro de um zip)
+
+Como o scrcpy-f usa: manda o .jar para /data/local/tmp do celular pelo adb e
+roda  CLASSPATH=/data/local/tmp/scrcpyf-icones.jar app_process / scrcpyf.Icones
+<tamanho> <pacote> <pacote> ...  -- igual o scrcpy faz com o servidor dele.
+Cada linha da saida e "pacote<TAB>png-em-base64" (ou "pacote<TAB>-").
+
+Como remontar o .jar depois de mexer no .smali (fora do Windows, com Java):
+o assembler de smali vem dentro do apktool.jar. Uma classe de 5 linhas chama
+brut.androlib.src.SmaliBuilder.build(pasta_smali, classes.dex, 26); depois
+basta zipar o classes.dex como scrcpyf-icones.jar. Detalhe no
+docs\CONTEXTO.md (r74).
+
+Tela.java / scrcpyf-tela.jar (r154, Java desde o r156): liga e desliga o
+PAINEL da tela, o mesmo que o scrcpy faz no --turn-screen-off. O vigia do
+sono deixa ele de pe (CLASSPATH=/data/local/tmp/scrcpyf-tela.jar
+app_process / scrcpyf.Tela vigia): ele mesmo le o botao no logcat, acorda o
+celular e alterna o painel, e escreve "botao <acesa|apagada> ..." com os
+tempos. Aceita "on"/"off" na entrada ("ok <modo> <telas>" ou "erro ...").
+Sem "vigia" so obedece on/off; com "on"/"off" como argumento faz uma vez.
+Como remontar: javac --release 8 -d cls Tela.java (pasta scrcpyf/) e
+java -jar dx-30.0.2.jar --dex --min-sdk-version=26 --output=classes.dex cls
+(o dx vem no dex-tools 2.4 do dex2jar, no GitHub); zipar o classes.dex.

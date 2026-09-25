@@ -1,0 +1,11 @@
+# Dependencias do scrcpy-f.
+#
+# O nucleo (achar o celular, montar a linha, subir e derrubar) nao usa nada
+# fora da biblioteca padrao -- de proposito, para a bancada de teste rodar em
+# qualquer maquina. Estas duas existem por causa do icone da bandeja e dos
+# desenhos da janela. A janela em si e Tkinter, que ja vem com o Python.
+#
+# Instalar uma vez:  python -m pip install -r requirements.txt
+
+pystray>=0.19
+Pillow>=10.0

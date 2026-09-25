@@ -1,0 +1,105 @@
+scrcpy-f -- o celular Android junto do PC
+==========================================
+
+Nao precisa instalar nada: o proprio programa baixa o scrcpy.
+Requisitos: Windows 10 (1803+) ou 11, 64 bits; Android 5 ou mais novo
+(som pelo PC: Android 11+; apps em janela propria: Android 10+).
+
+
+1. NO CELULAR (uma vez so)
+--------------------------
+a) Ative as Opcoes do desenvolvedor: Configuracoes > Sobre o telefone >
+   Informacoes do software > toque 7 vezes em "Numero de compilacao".
+b) Em Opcoes do desenvolvedor, ligue "Depuracao USB".
+c) Deixe o celular na MESMA rede Wi-Fi do PC.
+
+
+2. PRIMEIRA ABERTURA
+--------------------
+De dois cliques em scrcpy-f.exe. Na primeira vez a janela abre em OPCOES:
+
+  a) Clique em "instalar": o programa baixa o scrcpy mais novo e poe na
+     pasta "scrcpy", ao lado dele (o Windows pede permissao de
+     administrador). Ja tem o scrcpy? Clique em "usar outra pasta".
+
+  b) Clique em PAREAR, na lista da esquerda:
+       procurar   acha sozinho um celular que o PC ja alcanca -- e so
+                  clicar em "usar".
+       cabo usb   primeira vez, o mais simples: ligue o cabo e clique em
+                  conectar. No fim ele fica conectado sem fio e o cabo
+                  pode sair.
+       codigo     sem cabo, com o codigo de pareamento do Android.
+
+Quando o celular nao aparecer (por exemplo, depois de reiniciar o
+celular), o proprio programa abre o PAREAR sozinho.
+
+
+3. USAR
+-------
+Aparece um icone de celular ao lado do relogio e a janela do programa.
+Na lista da esquerda:
+
+  ESPELHAR   escolha o que vem do celular: imagem e som, so som (voce
+             joga no celular e o som sai no PC) ou so imagem. Atalho:
+             Ctrl+Alt+1.
+  EXTENSAO   o celular vira uma "tela a mais": leve o mouse ate a borda
+             marcada na tela e ele passa para o celular, junto com o
+             teclado. Para voltar, leve o cursor de volta pela mesma
+             borda, ou aperte Tab duas vezes rapido. Atalho: Ctrl+Alt+2.
+             Na primeira vez que ligar, deixe o mouse parado um instante
+             (ele calibra).
+             Volume do celular: Ctrl+Alt+= e Ctrl+Alt+-.
+             Acentos: no celular, em Teclado fisico > scrcpy, escolha o
+             mesmo layout do teclado do PC.
+             Na aba "personalizar", clique no mapa para arrastar o
+             celular para o lado da tela onde ele fica de verdade.
+  APPS       cada app do celular numa janela propria do PC. Clique
+             abre; botao direito ajusta so aquele app (e cria o atalho
+             dele na area de trabalho).
+  STATUS     bateria, temperatura e o que pesa no celular.
+  OPCOES     notificacoes, abrir com o Windows, pagina inicial, pasta do
+             scrcpy, atualizacoes, atalhos de teclado e qualidade.
+
+Clicar no X esconde a janela (o programa continua ao lado do relogio).
+SEGURAR o X por 1 segundo fecha o programa.
+
+
+4. ABRIR JUNTO COM O WINDOWS (opcional)
+---------------------------------------
+Em OPCOES > geral, ligue "abrir com o windows" ("iniciar mais rapido"
+abre junto com o login e pede o administrador uma vez). Se mudar a pasta
+do programa de lugar, desligue e ligue de novo.
+
+
+   ATUALIZACOES: em OPCOES > geral escolha de quanto em quanto tempo
+   procurar versao nova do scrcpy e do scrcpy-f. O programa sempre
+   pergunta antes, e seus ajustes ficam como estao.
+
+Se a chave nao ligar: aperte Windows+R, digite  shell:startup  e de
+Enter. Na pasta que abrir, arraste o scrcpy-f.exe com o botao DIREITO do
+mouse e escolha "Criar atalhos aqui".
+
+
+5. SE O ANTIVIRUS RECLAMAR
+--------------------------
+O programa nao tem assinatura digital (custa caro para projeto pessoal) e
+passa teclado e mouse para o celular -- isso as vezes faz o Windows
+Defender desconfiar sem motivo. Para liberar:
+Seguranca do Windows > Protecao contra virus e ameacas > Historico de
+protecao > clique no aviso do scrcpy-f > Acoes > Permitir.
+
+
+6. SE ALGO DER ERRADO
+---------------------
+Feche o programa (segure o X da janela por 1 segundo) e avise quem te
+passou o programa. O que aconteceu fica anotado numa pasta oculta: para
+achar, cole na barra de endereco do Explorador, com a pasta do programa
+aberta:   _internal\relatorios
+e mande os arquivos de la.
+
+
+7. A PASTA DO PROGRAMA
+----------------------
+Ao abrir pela primeira vez, a pasta _internal (as pecas do Python que o
+programa usa) fica oculta. Nao apague nem mexa nela: sem ela o programa
+nao abre.

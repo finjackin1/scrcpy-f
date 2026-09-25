@@ -1,0 +1,7 @@
+# Fim de linha: .bat PRECISA de CRLF no Windows (com LF o cmd erra rotulos)
+* text=auto
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.jar binary
+*.ico binary
+*.png binary

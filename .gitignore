@@ -1,0 +1,48 @@
+# Estado local / dados do celular e da instalacao (dependem da maquina)
+phone_ip.txt
+caminho-scrcpy.txt
+config.json
+config.json.*
+
+# Python
+__pycache__/
+*.pyc
+
+# Publicacao (publicar.bat): tudo gerado, nada para versionar
+dist/
+build/
+publicacao/scrcpy-f.ico
+
+# Gerado em tempo de execucao (o icone da janela do espelhamento e os .bat de
+# iniciar com o Windows, escritos so quando o Windows pede administrador)
+dados/
+ferramentas/criar-tarefa-inicio.bat
+ferramentas/remover-tarefa-inicio.bat
+ferramentas/instalar-scrcpy.bat
+ferramentas/atualizar-scrcpy-f.bat
+ferramentas/reabrir-scrcpy-f.bat
+
+# O scrcpy baixado pelo botao "instalar" (r166): cada um baixa o seu
+/scrcpy/
+
+# Logs, relatorios e saidas de sonda (podem ter dados do celular)
+relatorios/*
+!relatorios/.gitkeep
+
+# Editor / SO
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# Icones dos apps do celular, guardados pelo programa (APPS)
+icones/
+
+# Arquivos velhos esperando ele apagar (organizacao de 23/set/2026)
+_para_apagar/
+
+# Documento interno (escrito por Claude para Claude), zips e sobras
+docs/CONTEXTO.md
+*.zip
+*.bak
+.lixeira-fmcp/
