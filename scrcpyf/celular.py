@@ -55,10 +55,21 @@ def _rodar(argumentos, espera=20) -> str:
         return ""
 
 
+# (r192) A CONEXAO PREFERIDA (seletor do parear): "sem_fio" (de fabrica) ou
+# "cabo". E preferencia, nao trava: sem a preferida, vale a outra. O programa
+# acerta isto ao abrir e a cada troca; todo caminho que procura o celular
+# passa por `escolher_serial`, entao a regra mora so aqui.
+PREFERENCIA = "sem_fio"
+
+
+def e_cabo(serial: str) -> bool:
+    return bool(serial) and ":" not in serial and "._tcp" not in serial.lower()
+
+
 def escolher_serial(texto: str) -> str:
     """
-    Le a saida do `adb devices` e devolve o melhor candidato pronto pra uso.
-    Vazio quando nao ha nenhum.
+    Le a saida do `adb devices` e devolve o melhor candidato pronto pra uso,
+    na ordem da `PREFERENCIA`. Vazio quando nao ha nenhum.
     """
     sem_fio = por_endereco = por_cabo = ""
     for linha in (texto or "").replace("\r", "").split("\n"):
@@ -74,6 +85,8 @@ def escolher_serial(texto: str) -> str:
             por_endereco = por_endereco or serial
         else:
             por_cabo = por_cabo or serial
+    if PREFERENCIA == "cabo":
+        return por_cabo or sem_fio or por_endereco
     return sem_fio or por_endereco or por_cabo
 
 

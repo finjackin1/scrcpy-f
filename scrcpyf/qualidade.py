@@ -44,6 +44,8 @@ CODEC_VIDEO = [("h264", "H.264"), ("h265", "H.265")]
 # config antigo com esses valores so fica sem opcao marcada.
 TAXA_VIDEO = [("2M", "2"), ("4M", "4"), ("8M", "8"), ("16M", "16"),
               ("24M", "24")]
+# (r196) Pelo cabo a banda sobra: 32 e 40 voltam, SO no conjunto do cabo.
+TAXA_VIDEO_CABO = TAXA_VIDEO[1:] + [("32M", "32"), ("40M", "40")]
 QUADROS = [(30, "30"), (60, "60"), (90, "90"), (120, "120")]
 # (r189) Em "p" (lado curto). 0 = "celular": a do aparelho, sem cortar.
 RESOLUCAO = [(0, "celular"), (1440, "1440p"), (1080, "1080p"),
@@ -260,19 +262,101 @@ PREDEF_FIXAS = [
 ]
 PREDEF_INICIAL = "equilibrado"
 
+# ============================================================================
+# (r196) QUALIDADE POR CONEXAO (pedido dele, 30/set/2026): "pelo cabo ele
+# suporta mais qualidade, estabilidade e menor latencia". Dois CONJUNTOS,
+# cada um com as suas fixas, ate 3 dele e a sua escolhida:
+#   - "sem_fio": o `q` de sempre (config antigo continua valendo inteiro);
+#   - "cabo": `q["cabo"]`, com a mesma forma, criado de fabrica na 1a vez.
+# Os ids sao UNICOS entre os dois (fixas do cabo "cabo_*", as dele "c1".."c3"
+# contra "p1".."p3"), entao `valores_da_predef` acha qualquer uma sem saber
+# de qual conjunto e.
+#
+# As fixas do cabo, pelo que cada uma faz:
+#   rapido      -- menor atraso: H.264 (decodifica mais rapido que H.265),
+#                  1080p e ate 120 quadros (a tela do celular limita),
+#                  16 Mb/s; som com 20 ms (o cabo quase nao oscila).
+#   equilibrado -- a resolucao do celular a 60 quadros, 24 Mb/s, som 192K.
+#   maxima      -- H.265 a 40 Mb/s na resolucao do celular; som FLAC (sem
+#                  perda) com 50 ms de folga.
+# Atraso de imagem 0 nas tres: pelo cabo nao ha oscilacao a absorver.
+# ============================================================================
 
-def qualidade_de_fabrica() -> dict:
-    for c, _n, v, a in PREDEF_FIXAS:
-        if c == PREDEF_INICIAL:
+CONEXOES = ("sem_fio", "cabo")
+# Onde modo e app guardam a predefinicao PROPRIA de cada conexao. "predef"
+# e a de sempre (virou a do sem fio, sem migrar nada).
+CHAVES_PREDEF = {"sem_fio": "predef", "cabo": "predef_cabo"}
+
+PREDEF_FIXAS_CABO = [
+    ("cabo_rapido", "rápido",
+     {"codec": "h264", "bitrate": "16M", "fps_max": 120, "resolucao": 1080,
+      "buffer_ms": 0},
+     {"codec": "opus", "bitrate": "128K", "buffer_ms": 20}),
+    ("cabo_equilibrado", "equilibrado",
+     {"codec": "h264", "bitrate": "24M", "fps_max": 60, "resolucao": 0,
+      "buffer_ms": 0},
+     {"codec": "opus", "bitrate": "192K", "buffer_ms": 20}),
+    ("cabo_maxima", "máxima",
+     {"codec": "h265", "bitrate": "40M", "fps_max": 60, "resolucao": 0,
+      "buffer_ms": 0},
+     {"codec": "flac", "bitrate": "256K", "buffer_ms": 50}),
+]
+PREDEF_INICIAL_CABO = "cabo_equilibrado"
+
+TEXTO_DAS_FIXAS = {
+    "leve": "menor atraso e sem travar no wi-fi; imagem em 480p.",
+    "equilibrado": "resposta rápida, imagem em 720p. pede wi-fi bom.",
+    "celular": "a resolução exata do celular. pede wi-fi bom.",
+    "cabo_rapido": "o menor atraso: 1080p, até 120 quadros, som em 20 ms.",
+    "cabo_equilibrado": "a resolução do celular, rápida e estável.",
+    "cabo_maxima": "a melhor imagem (h.265, 40 mb/s) e som sem perda.",
+}
+
+
+def fixas(conexao: str = "sem_fio") -> list:
+    return PREDEF_FIXAS_CABO if conexao == "cabo" else PREDEF_FIXAS
+
+
+def conjunto(q: dict, conexao: str = "sem_fio") -> dict:
+    """O dict de qualidade de uma conexao (o do cabo nasce aqui)."""
+    if conexao != "cabo":
+        return q
+    c = q.get("cabo")
+    if not isinstance(c, dict):
+        c = _fabrica(PREDEF_FIXAS_CABO, PREDEF_INICIAL_CABO)
+        q["cabo"] = c
+    return c
+
+
+def conexao_da_predef(q: dict, ident) -> str | None:
+    for con in CONEXOES:
+        if any(c == ident for c, *_r in todas_predef(q, con)):
+            return con
+    return None
+
+
+def taxas_de_video(conexao: str) -> list:
+    return TAXA_VIDEO_CABO if conexao == "cabo" else TAXA_VIDEO
+
+
+def _fabrica(lista, inicial) -> dict:
+    for c, _n, v, a in lista:
+        if c == inicial:
             return {"video": dict(v), "audio": dict(a),
-                    "escolhida": PREDEF_INICIAL, "minhas": []}
+                    "escolhida": inicial, "minhas": []}
     return {"video": {}, "audio": {}, "escolhida": None, "minhas": []}
 
 
-def todas_predef(q: dict) -> list:
-    """[(id, nome, video, audio, fixa)] -- as fixas e depois as dele."""
-    saida = [(c, n, v, a, True) for c, n, v, a in PREDEF_FIXAS]
-    for m in (q.get("minhas") or [])[:MAX_MINHAS]:
+def qualidade_de_fabrica() -> dict:
+    return _fabrica(PREDEF_FIXAS, PREDEF_INICIAL)
+
+
+def todas_predef(q: dict, conexao: str = "sem_fio") -> list:
+    """[(id, nome, video, audio, fixa)] -- as fixas e depois as dele, do
+    conjunto da `conexao`."""
+    base = conjunto(q, conexao)
+    saida = [(c, n, v, a, True) for c, n, v, a in fixas(conexao)]
+    for m in (base.get("minhas") or [])[:MAX_MINHAS]:
         if isinstance(m, dict) and m.get("id"):
             saida.append((m["id"], str(m.get("nome") or m["id"]),
                           dict(m.get("video") or {}),
@@ -281,24 +365,27 @@ def todas_predef(q: dict) -> list:
 
 
 def valores_da_predef(q: dict, ident: str):
-    """(video, audio) de uma predefinicao, ou (None, None)."""
-    for c, _n, v, a, _f in todas_predef(q):
-        if c == ident:
-            return v, a
+    """(video, audio) de uma predefinicao de qualquer conjunto, ou
+    (None, None)."""
+    for con in CONEXOES:
+        for c, _n, v, a, _f in todas_predef(q, con):
+            if c == ident:
+                return v, a
     return None, None
 
 
-def predef_atual(q: dict):
+def predef_atual(q: dict, conexao: str = "sem_fio"):
     """A escolhida, se os campos ainda batem com ela; senao a primeira que
     bate; senao None (ajustada a mao)."""
-    video, audio = q.get("video") or {}, q.get("audio") or {}
+    base = conjunto(q, conexao)
+    video, audio = base.get("video") or {}, base.get("audio") or {}
 
     def bate(v, a):
         return all(_mesmo(video.get(c), v.get(c)) for c in CAMPOS_VIDEO) and \
             all(_mesmo(audio.get(c), a.get(c)) for c in CAMPOS_AUDIO)
 
-    lista = todas_predef(q)
-    escolhida = q.get("escolhida")
+    lista = todas_predef(q, conexao)
+    escolhida = base.get("escolhida")
     for c, _n, v, a, _f in lista:
         if c == escolhida and bate(v, a):
             return c

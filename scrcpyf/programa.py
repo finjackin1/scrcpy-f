@@ -211,6 +211,15 @@ class Programa:
         # quadro certo mesmo com o jogo rodando (pedido dele, 21/set/2026).
         sistema.prioridade_do_programa()
         self.config = Config.carregar()
+        celular.PREFERENCIA = self.conexao_preferida()
+        # (r192) Seriais de OUTRO celular (id diferente do que esta em uso):
+        # a troca de conexao nao os le de novo a cada olhada.
+        self._outro_celular: set = set()
+        self._escolha_manual = ""       # (r193) serial do "usar" da lista
+        # (r195) "scrcpy"/"app" -> (tipo, texto) da ultima procura; e a
+        # versao do scrcpy lida uma vez (None = ler de novo).
+        self.estado_atualizacao: dict = {}
+        self._versao_scrcpy = None
         self._migrar_formatos()
         self._tirar_tela_ligada_da_extensao()
         self._acertar_o_som_da_extensao()
@@ -526,6 +535,14 @@ class Programa:
         nomes = set(self.sessoes) | set(self.ligando)
         return {n[len(APP):] for n in nomes if n.startswith(APP)
                 and (n in self.ligando or self.ativo(n))}
+
+    def na_conexao(self, nome: str, conexao: str) -> bool:
+        """(r196) A sessao `nome` esta nessa conexao? Sem sessao (ou
+        subindo, sem serial ainda) conta como sim: quem pergunta e a troca
+        de qualidade, e na duvida ela aplica."""
+        s = self.sessoes.get(nome)
+        serial = getattr(s, "serial", "") if s is not None else ""
+        return not serial or self.conexao_de(serial) == conexao
 
     def app_subindo(self, pacote: str) -> bool:
         return (APP + pacote) in self.ligando
@@ -2394,7 +2411,7 @@ class Programa:
             # Sem som (varias janelas nao dividem o som do celular), sem
             # apagar a tela de verdade nem mexer no tempo dela, e o teclado
             # manda texto pronto (ver `sessao.montar`).
-            perfil = self.perfil_para_subir("jogo")
+            perfil = self.perfil_para_subir("jogo", alvo)
             perfil.setdefault("video", {})["ligado"] = True
             # QUALIDADE DOS APPS (23/set/2026): a unica, de OPCOES >
             # qualidade (ja veio no perfil_para_subir). O app personalizado
@@ -2405,9 +2422,12 @@ class Programa:
             import copy
             audio_q = None
             video_p = None
-            if deste.get("predef"):
+            # (r196) A predefinicao propria do app, da conexao desta sessao.
+            propria = deste.get(qualidade.CHAVES_PREDEF[
+                self.conexao_de(alvo)])
+            if propria:
                 video_p, audio_q = qualidade.valores_da_predef(
-                    self.config.qualidade, deste["predef"])
+                    self.config.qualidade, propria)
                 qualidade.aplicar_no_perfil(perfil, video_p, None)
             for campo, valor in (deste.get("video_fino") or {}).items():
                 qualidade.escrever(perfil, "video", campo, valor)
@@ -2802,7 +2822,7 @@ class Programa:
             desenho = icone.gravar_para_janela(caminhos.pasta_dados(),
                                                self.config.scrcpy_exe)
 
-            perfil = self.perfil_para_subir(nome)
+            perfil = self.perfil_para_subir(nome, alvo)
             sessao = Sessao(nome)
             if _tempo_de_tela_ms(perfil):
                 # O tempo de tela de ANTES, guardado para a troca sem
@@ -3059,7 +3079,14 @@ class Programa:
 
     # -- o que sobe de verdade ------------------------------------------------
 
-    def perfil_para_subir(self, nome: str) -> dict:
+    def conexao_de(self, serial: str = "") -> str:
+        """(r196) "cabo" ou "sem_fio" -- do serial que a sessao vai usar; sem
+        serial, a do celular em uso (senao a preferida)."""
+        if serial:
+            return "cabo" if celular.e_cabo(serial) else "sem_fio"
+        return self.conexao_em_uso() or self.conexao_preferida()
+
+    def perfil_para_subir(self, nome: str, serial: str = "") -> dict:
         """
         O perfil como o scrcpy vai recebe-lo. ESPELHAR E SOM VIRARAM UM MODO
         (visual novo, 21/set/2026): o perfil "jogo" ganhou `conteudo` --
@@ -3072,12 +3099,17 @@ class Programa:
         perfil = copy.deepcopy(self.config.perfil(nome))
         # QUALIDADE UNICA (23/set/2026): a de OPCOES > qualidade vale para
         # todos os modos, por cima do que o perfil tiver.
+        # (r196) ...do CONJUNTO DA CONEXAO que a sessao vai usar.
         q = self.config.qualidade
-        qualidade.aplicar_no_perfil(perfil, q.get("video"), q.get("audio"))
+        con = self.conexao_de(serial)
+        base = qualidade.conjunto(q, con)
+        qualidade.aplicar_no_perfil(perfil, base.get("video"),
+                                    base.get("audio"))
         # O modo pode usar outra predefinicao (espelhar e extensao tem a
-        # fileira "qualidade"; vazio = a de opcoes).
-        if perfil.get("predef"):
-            video_p, audio_p = qualidade.valores_da_predef(q, perfil["predef"])
+        # fileira "qualidade"; vazio = a de opcoes) -- uma por conexao.
+        propria = perfil.get(qualidade.CHAVES_PREDEF[con])
+        if propria:
+            video_p, audio_p = qualidade.valores_da_predef(q, propria)
             qualidade.aplicar_no_perfil(perfil, video_p, audio_p)
         self._resolucao_no_perfil(perfil)                   # (r189)
         if nome != "jogo":
@@ -3214,6 +3246,7 @@ class Programa:
         prontos = {s for s, e in vistos.items() if e == "device"}
         antes = getattr(self, "_prontos", None)
         self._prontos = prontos
+        self._outro_celular &= prontos     # saiu e voltou: vale olhar de novo
         atual = (self.celular or {}).get("serial", "")
         if atual and atual not in prontos:
             self.anotar("celular DESCONECTADO (%s)" % atual)
@@ -3228,6 +3261,61 @@ class Programa:
             if escolhido:
                 self.anotar("celular CONECTADO (%s)" % escolhido)
                 self._ler_o_celular(escolhido)
+        elif atual and prontos != antes:
+            self._reavaliar_conexao()
+        if prontos != antes:
+            # A janela mostra se o cabo esta la (seletor do parear).
+            self._avisar_mudanca()
+
+    # -- (r192) seletor de conexao ------------------------------------------
+    # Pedido dele (30/set/2026): escolher cabo ou sem fio SEM PARAR O ADB.
+    # A troca so muda qual conexao (ja de pe) o programa usa: nunca
+    # kill-server, nunca `tcpip`. O que esta aberto segue na conexao em que
+    # nasceu (o scrcpy nao migra); o que abrir depois usa a nova.
+
+    CONEXOES = ("sem_fio", "cabo")
+
+    def conexao_preferida(self) -> str:
+        v = self.config.opcoes.get("conexao")
+        return v if v in self.CONEXOES else "sem_fio"
+
+    def definir_conexao(self, valor: str) -> None:
+        if valor not in self.CONEXOES:
+            return
+        self.config.opcoes["conexao"] = valor
+        self.config.gravar()
+        celular.PREFERENCIA = valor
+        self.anotar("conexao preferida: %s" % valor)
+        self._reavaliar_conexao()
+        self._avisar_mudanca()
+
+    def conexao_em_uso(self) -> str:
+        """"cabo", "sem_fio" ou "" (nenhum celular)."""
+        serial = (self.celular or {}).get("serial", "")
+        if not serial:
+            return ""
+        return "cabo" if celular.e_cabo(serial) else "sem_fio"
+
+    def conexoes_de_pe(self) -> set:
+        """Quais conexoes o adb tem prontas agora (de qualquer celular)."""
+        prontos = getattr(self, "_prontos", None) or set()
+        return {"cabo" if celular.e_cabo(s) else "sem_fio" for s in prontos}
+
+    def _reavaliar_conexao(self) -> None:
+        """Com um celular em uso: se a conexao preferida apareceu (ou a
+        preferencia mudou), passa a usar ela. Le o celular por ela antes;
+        a troca so vale se for o MESMO celular (ver o pedido "celular")."""
+        atual = (self.celular or {}).get("serial", "")
+        prontos = (getattr(self, "_prontos", None) or set()) - \
+            self._outro_celular
+        if not atual or atual not in prontos:
+            return
+        escolhido = celular.escolher_serial(
+            "\n".join("%s\tdevice" % s for s in sorted(prontos)))
+        if escolhido and escolhido != atual:
+            self.anotar("conexao: trocando %s -> %s" % (atual, escolhido))
+            self._lendo_celular = False
+            self._ler_o_celular(escolhido)
 
     def _ler_o_celular(self, serial: str) -> None:
         """
@@ -3308,11 +3396,18 @@ class Programa:
         threading.Thread(target=trabalho, daemon=True,
                          name="ler-celular").start()
 
-    def ler_celular_agora(self) -> None:
+    def ler_celular_agora(self, serial: str = "") -> None:
         """Logo depois de parear: acha o celular (o endereco que o parear
-        guarda nem sempre e o que o adb usa) e le tudo dele."""
+        guarda nem sempre e o que o adb usa) e le tudo dele. (r193) Com
+        `serial` (o "usar" da lista), e ESSE celular, mesmo com outro em
+        uso."""
+        if serial:
+            self._escolha_manual = serial
+            self._outro_celular.discard(serial)
+
         def achar():
-            alvo = celular.achar(self.config.adb_exe, self.config.ip_reserva)
+            alvo = serial or celular.achar(self.config.adb_exe,
+                                           self.config.ip_reserva)
             if alvo:
                 self._lendo_celular = False
                 self._ler_o_celular(alvo)
@@ -3606,7 +3701,7 @@ class Programa:
         velha = self.sessoes.get(nome)
         if velha is None or not velha.rodando:
             return
-        perfil = self.perfil_para_subir(nome)
+        perfil = self.perfil_para_subir(nome, velha.serial)
         senha = object()
         self._troca_senha[nome] = senha
         self.trocando.add(nome)
@@ -3847,13 +3942,50 @@ class Programa:
             self.config.opcoes["ultima_procura"] = time.time()
             self.config.gravar()
             textos = [self._procurar_scrcpy(manual)]
+            self.estado_atualizacao["scrcpy"] = self._classificar(textos[0])
             try:
                 textos.append(self._procurar_app(manual))
+                self.estado_atualizacao["app"] = self._classificar(
+                    textos[1])
             except Exception:
                 log.exception("procurar o scrcpy-f")
+                self.estado_atualizacao["app"] = ("erro", "não deu")
+            self._versao_scrcpy = None      # pode ter trocado agora
             return " · ".join(t for t in textos if t)
         finally:
             trava.release()
+
+    # (r195) O RESULTADO POR PROGRAMA (tela de atualizacoes, em
+    # `self.estado_atualizacao`): cada linha da tabela mostra o seu.
+    # Classifica o texto curto que as procuras ja devolviam (um lugar so;
+    # os textos estao logo abaixo).
+
+    @staticmethod
+    def _classificar(texto: str) -> tuple[str, str]:
+        t = (texto or "").lower()
+        if "em dia" in t:
+            return "ok", "em dia"
+        if "disponível" in t:
+            import re
+            m = re.search(r"(\d+(?:\.\d+)+)", t)
+            return "nova", ("%s disponível" % m.group(1)) if m else \
+                "versão nova"
+        if "atualizando" in t or "pronto" in t or "instalad" in t:
+            return "ok", "atualizado"
+        if "cancelad" in t:
+            return "info", "cancelada"
+        if not t:
+            return "info", ""
+        return "erro", "não deu para procurar"
+
+    def versao_do_scrcpy_guardada(self) -> str:
+        """(r195) A versao do scrcpy lida uma vez (a tela pede a cada
+        montagem; ler de novo e subir o scrcpy.exe toda vez)."""
+        v = getattr(self, "_versao_scrcpy", None)
+        if v is None:
+            v = self.versao_do_scrcpy()
+            self._versao_scrcpy = v
+        return v
 
     def _procurar_app(self, manual: bool) -> str:
         """(r168) Versao nova do scrcpy-f no GitHub dele?"""
@@ -3963,8 +4095,12 @@ class Programa:
         if not self._instalando.acquire(blocking=False):
             return False, "já tem uma instalação em andamento"
         try:
-            return self._instalar_scrcpy(avisar)
+            ok, texto = self._instalar_scrcpy(avisar)
+            if ok:
+                self.estado_atualizacao["scrcpy"] = ("ok", "em dia")
+            return ok, texto
         finally:
+            self._versao_scrcpy = None      # (r195) a tela le de novo
             self._instalando.release()
 
     def _instalar_scrcpy(self, avisar) -> tuple[bool, str]:
@@ -4194,6 +4330,29 @@ class Programa:
                 # (r161) Resposta de um celular que ja saiu: nao reacende.
                 return
             antigo = self.celular
+            if antigo.get("serial") and \
+                    antigo.get("serial") != info.get("serial") and \
+                    (prontos is None or antigo.get("serial") in prontos):
+                # (r192) Troca de conexao com um celular em uso: so se for
+                # o MESMO aparelho. Outro celular fica marcado e nao e lido
+                # de novo (senao o seletor pularia de aparelho).
+                manual = info.get("serial") == getattr(
+                    self, "_escolha_manual", "")
+                if manual:
+                    # O "usar" da lista: o antigo vira o "outro" (senao a
+                    # reavaliacao o traria de volta).
+                    self._escolha_manual = ""
+                    if antigo.get("id") != info.get("id"):
+                        self._outro_celular.add(antigo.get("serial"))
+                elif antigo.get("id") and info.get("id") and \
+                        antigo.get("id") != info.get("id"):
+                    self._outro_celular.add(info.get("serial"))
+                    self.anotar("conexao: %s e outro celular; fica o atual"
+                                % info.get("serial"))
+                    return
+                self.anotar("conexao: agora por %s (%s)" % (
+                    "cabo" if celular.e_cabo(info.get("serial", ""))
+                    else "sem fio", info.get("serial")))
             self.celular = dict(antigo, **info) if (
                 antigo.get("serial") == info.get("serial")) else info
             if self.celular != antigo:

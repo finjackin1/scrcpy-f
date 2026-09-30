@@ -15,8 +15,9 @@ numa janela própria do Windows.
    administrador). Já tem o scrcpy? Use **usar outra pasta**. Até o scrcpy
    existir, só **Opções › geral** fica liberada.
 3. No celular, ligue a **Depuração sem fio** (Opções do desenvolvedor), deixe
-   na mesma rede Wi-Fi do PC e conecte em **Parear** — procurando, pelo cabo
-   USB ou com código.
+   na mesma rede Wi-Fi do PC. Um celular já pareado aparece sozinho em
+   **Parear › conexão**; um celular novo entra por **Parear › adicionar**,
+   com cabo USB ou com código.
 
 O programa fica na bandeja, ao lado do relógio. Clique no ícone para abrir a
 janela; botão direito para o menu.
@@ -34,8 +35,8 @@ recurso não existe na versão dele, em vez de quebrar.
 | **Extensão** (Ctrl+Alt+2) | o celular vira uma tela a mais do PC: o mouse e o teclado passam para ele pela borda (veja abaixo) |
 | **Apps** | cada app do celular numa janela própria do Windows, com o ícone e o nome do app e um botão separado na barra de tarefas. O celular continua livre na sua mão |
 | **Status** | bateria, temperatura, memória e o que mais pesa no celular |
-| **Parear** | conectar o celular. O quadradinho fica verde com ele conectado — em tempo real: desligou a depuração ou saiu da rede, o programa percebe |
-| **Opções** | notificações, abrir com o Windows, página inicial, pasta do scrcpy e atualizações; atalhos de teclado; qualidade de imagem e som (predefinições **leve**, **equilibrado** e **celular**, e até 3 suas; resolução em 480p/720p/1080p/1440p ou a do celular) |
+| **Parear** | **conexão**: o celular em uso, os outros por perto e a conexão preferida — **sem fio** ou **cabo** (trocar não derruba nada: o que está aberto segue como está, o que abrir depois usa a nova). **adicionar**: parear um celular novo, com cabo ou com código. O quadradinho fica verde com o celular conectado, em tempo real |
+| **Opções** | notificações, abrir com o Windows, página inicial, pasta do scrcpy e atualizações; atalhos de teclado; qualidade de imagem e som **separada por conexão**: **sem fio** (predefinições **leve**, **equilibrado** e **celular**) e **cabo** (**rápido**, **equilibrado** e **máxima** — até 120 quadros, 40 Mb/s e som sem perda), cada uma com até 3 suas; resolução em 480p/720p/1080p/1440p ou a do celular. O programa usa a da conexão em uso, e Espelhar, Extensão e cada app podem ter a sua para cada conexão |
 
 Tudo é gravado no instante do clique, sem botão de salvar.
 
@@ -78,9 +79,11 @@ na frente. Ctrl+Alt+Del e Windows+L continuam sendo do PC.
 
 ### Atualizações
 
-Em **Opções**, escolha de quanto em quanto tempo procurar versão nova (todo
-dia, semana, mês ou nunca) — do **scrcpy** e do próprio **scrcpy-f** — ou
-clique em **procurar atualização** para ver na hora. Quando
+Em **Opções › geral**, a tabela **atualizações** mostra a versão do
+**scrcpy-f** e do **scrcpy** e se cada um está em dia. **Procurar agora**
+confere na hora; em **procurar sozinho** você escolhe diário, semanal,
+mensal ou nunca. Versão nova aparece em laranja — clique nela para
+atualizar. Quando
 sai uma, o programa pergunta antes; com o sim, baixa, confere o arquivo e
 troca (pedindo permissão de administrador). Seus ajustes, apps e atalhos
 ficam como estão. A internet só é usada para isso, e só no GitHub.
@@ -96,7 +99,7 @@ Windows.
 ## Se algo der errado
 
 - Celular não encontrado: o programa diz o que conferir. Se nada resolver,
-  plugue o cabo USB e use **Parear > pelo cabo**.
+  plugue o cabo USB e use **Parear › adicionar › com cabo**.
 - O que o programa fez fica registrado em `_internal\relatorios\` (no
   pacote). Ao relatar um problema, esses arquivos ajudam.
 

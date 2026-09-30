@@ -94,8 +94,9 @@ ABAS = {
     "apps": [("lista", "apps"), ("aparencia", "ajustes"),
              ("personalizados", "personalizados")],
     "celular": [("status", "celular")],
-    "parear": [("procurar", "procurar"), ("cabo", "pelo cabo"),
-               ("codigo", "por código")],
+    # (r193) Duas abas pela frequencia de uso (pedido dele, 30/set/2026: o
+    # parear estava "desconexo"): o dia a dia e o celular novo.
+    "parear": [("conexao", "conexão"), ("adicionar", "adicionar")],
     "opcoes": [("geral", "geral"), ("atalhos", "atalhos"),
                ("qualidade", "qualidade")],
 }
@@ -172,7 +173,9 @@ class Janela(tk.Tk):
             self._item = "opcoes"
         self._aba = {"jogo": "basico", "extensao": "basico", "apps": "lista",
                      "celular": "status",
-                     "parear": "procurar", "opcoes": "geral"}
+                     "parear": "conexao", "opcoes": "geral"}
+        self._metodo = "cabo"           # (r193) ADICIONAR: "cabo" | "codigo"
+        self._prontos_vistos = None     # (r193) outros celulares ao vivo
         # Apps em janela propria: a lista vem do celular (uns segundos) e
         # fica guardada ate ele pedir "atualizar".
         self._apps: list | None = None
@@ -649,7 +652,7 @@ class Janela(tk.Tk):
 
     def _abrir_parear(self) -> None:
         """O celular nao apareceu: a janela abre direto no parear."""
-        self.abrir_em("parear", "procurar")
+        self.abrir_em("parear", "conexao")
         self._ja_procurou = False
         self.mostrar()
         self._talvez_procurar()
@@ -884,8 +887,11 @@ class Janela(tk.Tk):
         """
         try:
             if tela == "_tela_opcoes_qualidade":
+                # (r197b) + a conexao mostrada: sem ela, a tela guardada
+                # voltava na conexao antiga depois da troca (teste dele).
                 return (repr(self._config.qualidade),
-                        getattr(self, "_renomeando", None))
+                        getattr(self, "_renomeando", None),
+                        self._conexao_da_qualidade())
             if tela == "_tela_opcoes_atalhos":
                 m = self.motor
                 return (repr(list(atalhos_mod.em_ordem(self._config))),
@@ -1093,11 +1099,13 @@ class Janela(tk.Tk):
             tk.Frame(pai, bg=E.LINHA, height=1).pack(side="top", fill="x")
         return c
 
-    def _fila(self, pai, nome: str, opcoes, valor, ao_escolher) -> E.Segmentado:
+    def _fila(self, pai, nome: str, opcoes, valor, ao_escolher,
+              espaco: int = 6, nome_larg: int = 11) -> E.Segmentado:
         linha = tk.Frame(pai, bg=E.FUNDO)
-        linha.pack(side="top", fill="x", pady=(E.px(0), E.px(6)))
+        linha.pack(side="top", fill="x", pady=(E.px(0), E.px(espaco)))
         tk.Label(linha, text=nome.upper(), bg=E.FUNDO, fg=E.TEXTO_2,
-                 font=E.fonte(E.ROTULO), width=11, anchor="w").pack(side="left")
+                 font=E.fonte(E.ROTULO), width=nome_larg,
+                 anchor="w").pack(side="left")
         s = E.Segmentado(linha, opcoes, valor, ao_escolher)
         s.pack(side="left", fill="x", expand=True)
         return s
@@ -1166,8 +1174,9 @@ class Janela(tk.Tk):
 
     def _nome_da_qualidade(self) -> str:
         q = self._config.qualidade
-        atual = qualidade.predef_atual(q)
-        for c, n, _v, _a, _f in qualidade.todas_predef(q):
+        con = self.programa.conexao_de()
+        atual = qualidade.predef_atual(q, con)
+        for c, n, _v, _a, _f in qualidade.todas_predef(q, con):
             if c == atual:
                 return n
         return "ajustada"
@@ -1179,16 +1188,24 @@ class Janela(tk.Tk):
         e mudar predefinicao continua so em opcoes.
         """
         perfil = self._config.perfil(nome)
-        E.Rotulo(pai, "qualidade").pack(side="top", fill="x",
-                                        pady=(E.px(14), E.px(6)))
-        todas = qualidade.todas_predef(self._config.qualidade)
+        # (r196) UMA POR CONEXAO: a fileirinha ao lado do rotulo escolhe
+        # qual das duas se ve/edita (abre na do modo no ar, senao na do
+        # celular em uso).
+        con = self._con_da_fileira(nome)
+        topo = tk.Frame(pai, bg=E.FUNDO)
+        topo.pack(side="top", fill="x", pady=(E.px(14), E.px(6)))
+        E.Rotulo(topo, "qualidade").pack(side="left")
+        E.Segmentado(topo, [("sem_fio", "sem fio"), ("cabo", "cabo")], con,
+                     lambda v: self._ver_con_da_fileira(nome, v)).pack(
+            side="right")
+        todas = qualidade.todas_predef(self._config.qualidade, con)
         fixas = [(c, n) for c, n, _v, _a, f in todas if f]
         minhas = [(c, _encurtar(n, 11)) for c, n, _v, _a, f in todas
                   if not f]
         # Sem "padrao" (pedido dele, 23/set/2026): aparece marcada a que
         # vale de verdade -- a do modo, senao a de opcoes.
-        atual = perfil.get("predef") or \
-            qualidade.predef_atual(self._config.qualidade)
+        atual = perfil.get(qualidade.CHAVES_PREDEF[con]) or \
+            qualidade.predef_atual(self._config.qualidade, con)
         # Duas fileiras: as fixas e, embaixo, as dele (se houver) -- todas
         # numa fileira so nao cabem em meia janela.
         for grupo in (fixas, minhas):
@@ -1196,16 +1213,72 @@ class Janela(tk.Tk):
                 E.Segmentado(pai, grupo,
                              atual if atual in dict(grupo) else None,
                              lambda v: self._escolheu_predef_do_modo(
-                                 nome, v)).pack(side="top", fill="x",
-                                                pady=(E.px(0), E.px(4)))
+                                 nome, v, con)).pack(side="top", fill="x",
+                                                     pady=(E.px(0), E.px(4)))
 
-    def _escolheu_predef_do_modo(self, nome: str, ident: str) -> None:
+    def _con_da_fileira(self, nome: str) -> str:
+        # (r197) Abre na conexao EM USO (a que a proxima partida usa); ver
+        # `_seguir_a_conexao`.
+        vistas = self.__dict__.setdefault("_con_vista", {})
+        if vistas.get(nome) not in qualidade.CONEXOES:
+            vistas[nome] = self.programa.conexao_de()
+        return vistas[nome]
+
+    def _seguir_a_conexao(self) -> None:
+        """(r197) PEDIDO DELE (30/set/2026): "ao trocar o modo de conexao a
+        predefinicao de qualidade tem que seguir". Mudou a conexao em uso
+        (ou a preferida, sem celular): as fileiras sem fio|cabo das telas de
+        qualidade voltam para ela, e a tela a vista remonta."""
+        con = self.programa.conexao_de()
+        if con == getattr(self, "_con_seguida", None):
+            return
+        primeira = getattr(self, "_con_seguida", None) is None
+        self._con_seguida = con
+        if primeira:
+            return
+        self._con_vista = {}
+        self._qual_con = None
+        # (r198) A tela de qualidade GUARDADA (escondida para voltar rapido)
+        # ainda mostra a conexao antiga: descartada, a proxima visita monta
+        # de novo. Nao depende so da `_assinatura` (r197b, nao confirmado).
+        guardada = self._guardadas.pop("_tela_opcoes_qualidade", None)
+        if guardada is not None:
+            try:
+                guardada[0].destroy()
+            except tk.TclError:
+                pass
+            self._pre_geracao = getattr(self, "_pre_geracao", 0) + 1
+            geracao = self._pre_geracao
+            self.after(300, lambda: self._pre_montar(geracao))
+        self.programa.anotar("qualidade: seguiu a conexao -> %s%s" % (
+            con, " (tela guardada descartada)" if guardada else ""))
+        aba = self._aba.get(self._item)
+        if self._grande:        # o mapa grande da extensao aberto: fica
+            return
+        if (self._item in ("jogo", "extensao") or
+                (self._item, aba) in (("opcoes", "qualidade"),
+                                      ("apps", "personalizados"))):
+            self.after_idle(self._montar_conteudo)
+
+    def _ver_con_da_fileira(self, nome: str, con: str) -> None:
+        self.__dict__.setdefault("_con_vista", {})[nome] = con
+        self._montar_conteudo()
+
+    def _escolheu_predef_do_modo(self, nome: str, ident: str,
+                                 con: str = "sem_fio") -> None:
         perfil = self._config.perfil(nome)
+        chave = qualidade.CHAVES_PREDEF[con]
         if ident:
-            perfil["predef"] = ident
+            perfil[chave] = ident
         else:
-            perfil.pop("predef", None)
-        self._gravou(nome, "predefinicao = %s" % (ident or "padrao"))
+            perfil.pop(chave, None)
+        ok = self._config.gravar()
+        self.programa.anotar("ajuste '%s': predefinicao (%s) = %s%s" % (
+            nome, con, ident or "padrao", "" if ok else " (NAO GRAVOU)"))
+        self._conferir_gravacao(ok)
+        # So troca o que esta no ar NESTA conexao.
+        if self.programa.na_conexao(nome, con):
+            self.programa.mudou_a_qualidade(nome)
         self._montar_conteudo()
 
     def _escolheu_onde_jogo(self, onde: str) -> None:
@@ -2785,11 +2858,13 @@ class Janela(tk.Tk):
     def _resumo_do_app(self, conf: dict) -> str:
         """O que o app tem de proprio, em poucas palavras."""
         partes = []
-        if conf.get("predef"):
-            for c, n, _v, _a, _f in qualidade.todas_predef(
-                    self._config.qualidade):
-                if c == conf["predef"]:
-                    partes.append(n)
+        for con, chave in qualidade.CHAVES_PREDEF.items():   # (r196)
+            if conf.get(chave):
+                for c, n, _v, _a, _f in qualidade.todas_predef(
+                        self._config.qualidade, con):
+                    if c == conf[chave]:
+                        partes.append(n if con == "sem_fio"
+                                      else "cabo: " + n)
         if conf.get("video_fino"):
             partes.append("imagem")
         if conf.get("audio_fino"):
@@ -2851,11 +2926,17 @@ class Janela(tk.Tk):
         # marcado o que vale hoje para este app (o de opcoes / apps >
         # ajustes, ou o que ele ja escolheu aqui). Clicar grava so neste app.
         q = self._config.qualidade
-        predef = deste.get("predef") or qualidade.predef_atual(q)
-        base_v, base_a = qualidade.valores_da_predef(q, deste["predef"]) \
-            if deste.get("predef") else (None, None)
-        base_v = base_v or (q.get("video") or {})
-        base_a = base_a or (q.get("audio") or {})
+        # (r196) A predefinicao propria e UMA POR CONEXAO; a fileirinha ao
+        # lado do rotulo escolhe qual se ve (abre na da janela no ar, senao
+        # na do celular em uso). O ajuste fino abaixo vale nas duas.
+        con = self._con_da_fileira(APP + pacote)
+        chave = qualidade.CHAVES_PREDEF[con]
+        base = qualidade.conjunto(q, con)
+        predef = deste.get(chave) or qualidade.predef_atual(q, con)
+        base_v, base_a = qualidade.valores_da_predef(q, deste[chave]) \
+            if deste.get(chave) else (None, None)
+        base_v = base_v or (base.get("video") or {})
+        base_a = base_a or (base.get("audio") or {})
         fino_v = deste.get("video_fino") or {}
         fino_a = deste.get("audio_fino") or {}
 
@@ -2863,11 +2944,15 @@ class Janela(tk.Tk):
         # resto em TRES GRUPOS que abrem um de cada vez (pedido dele,
         # 25/set/2026: "separadas por tipo: video, audio, outros... ao abrir
         # uma sessao recolhe a outra"). (r190) Tudo recolhido ao entrar.
-        E.Rotulo(corpo, "predefinição").pack(side="top", fill="x",
-                                             pady=(E.px(0), E.px(6)))
+        topo = tk.Frame(corpo, bg=E.FUNDO)
+        topo.pack(side="top", fill="x", pady=(E.px(0), E.px(6)))
+        E.Rotulo(topo, "predefinição").pack(side="left")
+        E.Segmentado(topo, [("sem_fio", "sem fio"), ("cabo", "cabo")], con,
+                     lambda v: self._ver_con_da_fileira(APP + pacote, v)).pack(
+            side="left", padx=(E.px(10), E.px(0)))
         E.Segmentado(corpo, [(c, n) for c, n, _v, _a, _f in
-                             qualidade.todas_predef(q)], predef,
-                     lambda v: self._mudou_no_app(pacote, "predef", v)).pack(
+                             qualidade.todas_predef(q, con)], predef,
+                     lambda v: self._mudou_no_app(pacote, chave, v)).pack(
             side="top", fill="x", pady=(E.px(0), E.px(10)))
         self._ui["grupos_editor"] = {}
         g_video = self._grupo_do_editor(corpo, "video", "vídeo")
@@ -2896,6 +2981,9 @@ class Janela(tk.Tk):
             campo = ajuste["campo"]
             if campo in ("resolucao", "resolucao_max"):
                 continue            # (r184) e a resolucao da tela, acima
+            if campo == "bitrate":
+                # (r196) 32 e 40 so vendo o conjunto do cabo.
+                ajuste = dict(ajuste, opcoes=qualidade.taxas_de_video(con))
             self._fila(g_video, NOME_CURTO.get(("video", campo), campo),
                        self._opcoes_curtas(ajuste),
                        fino_v.get(campo, base_v.get(campo)),
@@ -2998,7 +3086,8 @@ class Janela(tk.Tk):
                 for v, r in ajuste["opcoes"]]
 
     def _mudou_no_app(self, pacote: str, campo: str, valor) -> None:
-        if campo == "predef":
+        eh_predef = campo in qualidade.CHAVES_PREDEF.values()     # (r196)
+        if eh_predef:
             # Escolher a predefinicao poe as fileiras todas nela.
             self._config.definir_app(pacote, "video_fino", "")
             self._config.definir_app(pacote, "audio_fino", "")
@@ -3008,7 +3097,7 @@ class Janela(tk.Tk):
                                                      self.programa.celular):
                 self._config.definir_app(pacote, "resolucao", "")
         self._virar_app(pacote, campo, valor or "")
-        if campo in ("predef", "formato"):
+        if eh_predef or campo == "formato":
             self.after_idle(self._montar_conteudo)
 
     def _fino_do_app(self, pacote: str, secao: str, campo: str, valor) -> None:
@@ -3204,7 +3293,12 @@ class Janela(tk.Tk):
         antes = pacote in self._config.personalizados()
         self._conferir_gravacao(self._config.definir_app(pacote, campo, valor))
         self.programa.anotar("app %s: %s = %s" % (pacote, campo, valor))
-        if campo not in AJUSTES_SEM_REABRIR:
+        # (r196) A predefinicao de UMA conexao so reabre a janela que esta
+        # nela (a do cabo nao mexe numa janela sem fio).
+        con = next((c for c, k in qualidade.CHAVES_PREDEF.items()
+                    if k == campo), None)
+        if campo not in AJUSTES_SEM_REABRIR and (
+                con is None or self.programa.na_conexao(APP + pacote, con)):
             self._agendar_reabrir({pacote})
         # Virou (ou deixou de ser) personalizado: o "voltar tudo ao padrao"
         # aparece/some no editor.
@@ -3540,29 +3634,200 @@ class Janela(tk.Tk):
             except tk.TclError:
                 pass
 
-    def _tela_parear_procurar(self, area) -> None:
+    # (r193) PAREAR EM DUAS ABAS (pedido dele, 30/set/2026: "desconexa").
+    # CONEXAO = o dia a dia: o celular em uso, a conexao preferida e os
+    # outros celulares, que aparecem sozinhos (a lista refaz quando o adb
+    # ve alguem entrar ou sair -- `_conferir_outros`). ADICIONAR = celular
+    # novo, uma vez: com cabo (so para ligar o sem fio) ou com codigo.
+
+    def _link(self, pai, texto: str, acao) -> tk.Label:
+        """Texto pequeno clicavel, com foco pelo Tab (teclado-e-foco)."""
+        rot = tk.Label(pai, text=texto, bg=E.FUNDO, fg=E.TEXTO_2,
+                       font=E.fonte(E.PEQUENA), anchor="w", cursor="hand2",
+                       takefocus=1, highlightthickness=1,
+                       highlightbackground=E.FUNDO, highlightcolor=E.ACENTO)
+        rot.bind("<Button-1>", lambda _e: acao())
+        rot.bind("<Return>", lambda _e: acao())
+        rot.bind("<space>", lambda _e: acao())
+        rot.bind("<Enter>", lambda _e: rot.configure(fg=E.TEXTO))
+        rot.bind("<Leave>", lambda _e: rot.configure(fg=E.TEXTO_2))
+        return rot
+
+    def _tela_parear_conexao(self, area) -> None:
         if self._sem_pasta(area):
             return
+        if not self._trabalhando and \
+                getattr(self, "_status_de", "") != "conexao":
+            self._status_parear = ("", E.TEXTO_2)
+        self._status_de = "conexao"
         esq, dir_ = self._duas(area)
-        E.Rotulo(esq, "celular que o pc já alcança").pack(side="top", fill="x",
-                                                          pady=(E.px(0), E.px(6)))
-        E.Texto(esq, "pelo cabo ou sem fio, pareado antes — para usar sem "
-                     "parear de novo.", largura=E.px(230)).pack(side="top", fill="x")
-        b = E.Botao(esq, "procurar", self._procurar, tipo="acao")
-        b.pack(side="top", fill="x", pady=(E.px(14), E.px(0)))
-        b.definir(ligado=not self._trabalhando)
-        self._ui["acao_parear"] = b
-        self._status(esq)
-        if self._config.ip_reserva and not self._status_parear[0]:
-            self._pintar_status("último celular: %s" % self._config.ip_reserva,
-                                E.APAGADO)
+        E.Rotulo(esq, "celular em uso").pack(side="top", fill="x",
+                                             pady=(E.px(0), E.px(6)))
+        nome = tk.Label(esq, text="", bg=E.FUNDO, font=E.fonte(E.CORPO),
+                        anchor="w")
+        nome.pack(side="top", fill="x")
+        detalhe = E.Texto(esq, "", cor=E.TEXTO_2, largura=E.px(230))
+        detalhe.pack(side="top", fill="x", pady=(E.px(2), E.px(0)))
+        self._ui["cel_nome"] = nome
+        self._ui["cel_detalhe"] = detalhe
+        vazio = tk.Frame(esq, bg=E.FUNDO)
+        self._ui["cel_vazio"] = vazio
+        E.Botao(vazio, "adicionar celular",
+                lambda: self._escolher_aba("adicionar"), tipo="acao").pack(
+            side="top", fill="x", pady=(E.px(12), E.px(0)))
+        self._seletor_de_conexao(esq)
 
-        E.Rotulo(dir_, "achados").pack(side="top", fill="x", pady=(E.px(0), E.px(6)))
+        E.Rotulo(dir_, "outros celulares").pack(side="top", fill="x",
+                                                pady=(E.px(0), E.px(6)))
         lista = tk.Frame(dir_, bg=E.FUNDO)
-        lista.pack(side="top", fill="both", expand=True)
+        lista.pack(side="top", fill="x")
         self._ui["lista_parear"] = lista
+        self._status(dir_)
+        rodape = tk.Frame(dir_, bg=E.FUNDO)
+        rodape.pack(side="bottom", fill="x")
+        self._link(rodape, "procurar de novo", self._procurar).pack(
+            side="left")
+        self._link(rodape, "adicionar ›",
+                   lambda: self._escolher_aba("adicionar")).pack(side="right")
+        self._pintar_celular_em_uso()
         self._mostrar_achados()
         self.after(150, self._talvez_procurar)
+
+    def _pintar_celular_em_uso(self) -> None:
+        nome = self._ui.get("cel_nome")
+        if nome is None or not nome.winfo_exists():
+            return
+        cel = self.programa.celular or {}
+        vazio = self._ui["cel_vazio"]
+        if cel.get("serial"):
+            partes = []
+            if cel.get("bateria") is not None:
+                partes.append("bateria %s%%" % cel["bateria"] + (
+                    " · carregando" if cel.get("carregando") else ""))
+            if cel.get("android"):
+                partes.append("android %s" % cel["android"])
+            pintura = ((cel.get("modelo") or "celular").upper(), E.VERDE,
+                       "  ·  ".join(partes), False)
+        else:
+            pintura = ("NENHUM CELULAR", E.APAGADO,
+                       "ligue a depuração sem fio (ou o cabo) no celular, "
+                       "ou adicione um celular novo.", True)
+        if pintura == getattr(self, "_cel_pintado", None) and \
+                nome.cget("text"):
+            return
+        self._cel_pintado = pintura
+        texto, cor, det, sem = pintura
+        nome.configure(text=texto, fg=cor)
+        self._ui["cel_detalhe"].configure(text=det)
+        if sem and not vazio.winfo_ismapped():
+            vazio.pack(side="top", fill="x", after=self._ui["cel_detalhe"])
+        elif not sem and vazio.winfo_ismapped():
+            vazio.pack_forget()
+
+    def _conferir_outros(self) -> None:
+        """(r193) OUTROS CELULARES AO VIVO: o adb viu alguem entrar ou sair
+        com a aba CONEXAO aberta -> procura de novo (em segundo plano)."""
+        prontos = frozenset(getattr(self.programa, "_prontos", None) or ())
+        if prontos == self._prontos_vistos:
+            return
+        primeira = self._prontos_vistos is None
+        self._prontos_vistos = prontos
+        if (not primeira and self._visivel and self._item == "parear"
+                and self._aba["parear"] == "conexao"
+                and not self._trabalhando and self._pasta_ok()):
+            self._procurar()
+
+    def _tela_parear_adicionar(self, area) -> None:
+        if self._sem_pasta(area):
+            return
+        if not self._trabalhando and \
+                getattr(self, "_status_de", "") != "adicionar":
+            self._status_parear = ("", E.TEXTO_2)   # o da outra aba nao vem
+        self._status_de = "adicionar"
+        esq, dir_ = self._duas(area)
+        E.Rotulo(esq, "como").pack(side="top", fill="x",
+                                   pady=(E.px(0), E.px(6)))
+        E.Segmentado(esq, [("cabo", "com cabo"), ("codigo", "com código")],
+                     self._metodo, self._escolheu_metodo).pack(
+            side="top", fill="x")
+        if self._metodo == "cabo":
+            # (r194) O texto do r193 dizia que o cabo "so serve para ligar o
+            # sem fio" -- errado desde o seletor do r192 (o cabo pode ser a
+            # propria conexao, em CONEXAO › conexao preferida).
+            explica = ("o pc autoriza o celular pelo cabo e já deixa a "
+                       "conexão sem fio pronta (os dois no mesmo wi-fi).\n\n"
+                       "depois, em conexão, você escolhe se usa pelo cabo "
+                       "ou sem fio.")
+        else:
+            explica = ("sem cabo, android 11 ou mais novo.\n\nno celular: "
+                       "opções do desenvolvedor › depuração sem fio › "
+                       "\"parear o dispositivo com código de pareamento\". "
+                       "digite ao lado o endereço e o código que aparecem.")
+        E.Texto(esq, explica, largura=E.px(230)).pack(
+            side="top", fill="x", pady=(E.px(12), E.px(0)))
+        if self._metodo == "cabo":
+            self._acao_cabo(dir_)
+        else:
+            self._acao_codigo(dir_)
+
+    def _escolheu_metodo(self, valor: str) -> None:
+        self._metodo = valor
+        self._montar_conteudo()
+
+    # (r192) SELETOR DE CONEXAO (pedido dele, 30/set/2026): sem fio ou cabo,
+    # trocado sem parar o adb. A regra fica no programa; aqui so a escolha e
+    # a linha que diz qual esta em uso agora.
+    CONEXOES = [("sem_fio", "sem fio"), ("cabo", "cabo")]
+
+    def _seletor_de_conexao(self, pai) -> None:
+        tk.Frame(pai, bg=E.LINHA, height=1).pack(side="top", fill="x",
+                                                 pady=(E.px(14), E.px(10)))
+        E.Rotulo(pai, "conexão preferida").pack(side="top", fill="x",
+                                                pady=(E.px(0), E.px(6)))
+        seg = E.Segmentado(pai, self.CONEXOES,
+                           self.programa.conexao_preferida(),
+                           self._escolheu_conexao)
+        seg.pack(side="top", fill="x")
+        linha = E.Texto(pai, "", cor=E.APAGADO, largura=E.px(230))
+        linha.pack(side="top", fill="x", pady=(E.px(6), E.px(0)))
+        self._ui["linha_conexao"] = linha
+        self._pintar_conexao()
+
+    def _escolheu_conexao(self, valor: str) -> None:
+        self.programa.definir_conexao(valor)
+        self._pintar_conexao()
+
+    def _texto_da_conexao(self) -> tuple[str, str]:
+        p = self.programa
+        quer, usa = p.conexao_preferida(), p.conexao_em_uso()
+        de_pe = p.conexoes_de_pe()
+        nome = {"cabo": "cabo", "sem_fio": "sem fio"}
+        if not usa:
+            return "nenhum celular em uso.", E.APAGADO
+        if usa == quer:
+            texto = "em uso: %s." % nome[usa]
+            if p.sessoes:
+                texto += " o que abrir agora usa esta conexão."
+            return texto, E.TEXTO_2
+        if quer not in de_pe:
+            falta = ("cabo não está ligado" if quer == "cabo"
+                     else "sem fio não está conectado")
+            return ("em uso: %s — %s." % (nome[usa], falta)), E.APAGADO
+        return "trocando para %s…" % nome[quer], E.TEXTO_2
+
+    def _pintar_conexao(self) -> None:
+        linha = self._ui.get("linha_conexao")
+        if linha is None or not linha.winfo_exists():
+            return
+        texto, cor = self._texto_da_conexao()
+        if linha.cget("text") != texto or linha.cget("fg") != cor:
+            linha.configure(text=texto, fg=cor)
+
+    def _e_o_em_uso(self, achado) -> bool:
+        cel = self.programa.celular or {}
+        return bool(cel.get("serial")) and (
+            achado.serial == cel.get("serial") or
+            (bool(cel.get("modelo")) and achado.modelo == cel.get("modelo")))
 
     def _mostrar_achados(self) -> None:
         lista = self._ui.get("lista_parear")
@@ -3575,18 +3840,21 @@ class Janela(tk.Tk):
                     "nada procurado ainda.", cor=E.APAGADO).pack(
                 side="top", fill="x")
             return
-        if not self._achados:
-            E.Texto(lista, "nenhum celular apareceu. confira se a depuração "
-                           "usb ou sem fio está ativada no celular, ou use as "
-                           "abas cabo usb / código.", cor=E.APAGADO,
-                    largura=E.px(230)).pack(side="top", fill="x")
+        # (r193) O celular em uso fica na coluna da esquerda, nao aqui.
+        outros = [a for a in self._achados if not self._e_o_em_uso(a)]
+        if not outros:
+            E.Texto(lista, "nenhum outro celular por perto."
+                    if self.programa.celular else
+                    "nenhum celular por perto.",
+                    cor=E.APAGADO, largura=E.px(230)).pack(side="top",
+                                                           fill="x")
             return
-        for achado in self._achados[:5]:
+        for achado in outros[:4]:
             linha = tk.Frame(lista, bg=E.FUNDO, highlightthickness=1,
                              highlightbackground=E.LINHA)
             linha.pack(side="top", fill="x", pady=(E.px(0), E.px(5)))
             E.Botao(linha, "usar", lambda a=achado: self._usar(a),
-                    tipo="acao" if len(self._achados) == 1 else "contorno"
+                    tipo="contorno" if self.programa.celular else "acao"
                     ).pack(side="right", padx=E.px(4), pady=E.px(4))
             textos = tk.Frame(linha, bg=E.FUNDO)
             textos.pack(side="left", fill="x", expand=True, padx=E.px(8), pady=E.px(4))
@@ -3612,7 +3880,7 @@ class Janela(tk.Tk):
         self._procurar()
 
     def _talvez_procurar(self) -> None:
-        if (self._item == "parear" and self._aba["parear"] == "procurar"
+        if (self._item == "parear" and self._aba["parear"] == "conexao"
                 and not self._ja_procurou and not self._trabalhando
                 and self._pasta_ok()):
             self._ja_procurou = True
@@ -3628,41 +3896,46 @@ class Janela(tk.Tk):
     def _usar(self, achado) -> None:
         self.programa.anotar("usar: %s (%s)" % (achado.descricao,
                                                achado.serial))
-        self._achados = None
+        # (r193) A lista FICA: o celular que estava em uso passa a aparecer
+        # nela (o filtro de `_mostrar_achados` tira so o novo em uso).
+        # (r193) "usar" num celular da lista = ESTE celular (antes o programa
+        # procurava de novo e, com dois, podia ficar com o outro).
+        self._usando = achado.serial
         if not achado.sem_fio:
-            # So no cabo: o mesmo caminho da aba "cabo usb", que abre a
-            # conexao sem fio.
+            if self.programa.conexao_preferida() == "cabo":
+                # (r192) Preferindo o cabo: usa ele como esta.
+                self._terminou(conexao.Resultado(
+                    True, "pronto: %s em uso, pelo cabo." % achado.modelo,
+                    modelo=achado.modelo))
+                return
+            # So no cabo: o mesmo caminho de ADICIONAR › com cabo, que abre
+            # a conexao sem fio (o serial muda: quem decide e o programa).
+            self._usando = ""
             self._conectar_cabo()
             return
-        self._achados = None
         self._terminou(conexao.Resultado(
             True, "pronto: %s em uso, sem fio%s." % (
                 achado.modelo, (" (%s)" % achado.endereco)
                 if achado.endereco else ""),
             modelo=achado.modelo, endereco=achado.endereco))
 
-    def _tela_parear_cabo(self, area) -> None:
-        if self._sem_pasta(area):
-            return
-        esq, dir_ = self._duas(area)
-        E.Rotulo(esq, "pelo cabo usb").pack(side="top", fill="x", pady=(E.px(0), E.px(6)))
+    def _acao_cabo(self, dir_) -> None:
+        """ADICIONAR › com cabo: os passos e o botao (coluna da direita)."""
+        E.Rotulo(dir_, "passos").pack(side="top", fill="x",
+                                      pady=(E.px(0), E.px(6)))
         for n, passo in enumerate((
                 "no celular, ative a depuração usb (opções do "
                 "desenvolvedor).",
-                "ligue o celular no pc pelo cabo, os dois no mesmo wi-fi.",
+                "ligue o celular no pc pelo cabo.",
                 "clique em conectar e aceite o aviso no celular.")):
-            linha = tk.Frame(esq, bg=E.FUNDO)
+            linha = tk.Frame(dir_, bg=E.FUNDO)
             linha.pack(side="top", fill="x", pady=(E.px(0), E.px(6)))
             tk.Label(linha, text="%d" % (n + 1), bg=E.FUNDO, fg=E.ACENTO,
                      font=E.fonte(E.PEQUENA, "bold"), width=2,
                      anchor="nw").pack(side="left", anchor="n")
             E.Texto(linha, passo, largura=E.px(200)).pack(side="left", fill="x")
-        E.Texto(esq, "no fim ele fica conectado sem fio e o cabo pode sair.",
-                cor=E.APAGADO, largura=E.px(230)).pack(side="top", fill="x",
-                                                 pady=(E.px(4), E.px(0)))
-        E.Rotulo(dir_, "conectar").pack(side="top", fill="x", pady=(E.px(0), E.px(6)))
         b = E.Botao(dir_, "conectar", self._conectar_cabo, tipo="acao")
-        b.pack(side="top", fill="x")
+        b.pack(side="top", fill="x", pady=(E.px(8), E.px(0)))
         b.definir(ligado=not self._trabalhando)
         self._ui["acao_parear"] = b
         self._status(dir_)
@@ -3670,17 +3943,8 @@ class Janela(tk.Tk):
     def _conectar_cabo(self) -> None:
         self._trabalhar("cabo", conexao.conectar_pelo_cabo)
 
-    def _tela_parear_codigo(self, area) -> None:
-        if self._sem_pasta(area):
-            return
-        esq, dir_ = self._duas(area)
-        E.Rotulo(esq, "sem fio, com código").pack(side="top", fill="x",
-                                                  pady=(E.px(0), E.px(6)))
-        E.Texto(esq, "no celular: opções do desenvolvedor › depuração sem "
-                     "fio › \"parear o dispositivo com código de "
-                     "pareamento\".\n\ndigite ao lado o endereço e o código "
-                     "que aparecem na tela do celular.",
-                largura=E.px(230)).pack(side="top", fill="x")
+    def _acao_codigo(self, dir_) -> None:
+        """ADICIONAR › com codigo: os campos e o botao (coluna da direita)."""
         self._ui["campo_endereco"] = self._campo(dir_, "endereço ip e porta",
                                                 "ex.: 192.168.0.10:37123")
         self._ui["campo_codigo"] = self._campo(dir_, "código de pareamento",
@@ -3756,7 +4020,14 @@ class Janela(tk.Tk):
             # A bateria ja aparece agora, sem esperar um modo ligar.
             # Le o celular JA (icone verde, cache, status): o endereco do
             # parear nem sempre e o nome que o adb usa para ele.
-            self.programa.ler_celular_agora()
+            self.programa.ler_celular_agora(getattr(self, "_usando", ""))
+            self._usando = ""
+            if self._item == "parear" and self._aba["parear"] == "adicionar":
+                # (r193) Adicionou: volta ao dia a dia, com ele em uso.
+                self.after(1500, lambda: (
+                    self._item == "parear" and
+                    self._aba["parear"] == "adicionar" and
+                    self._escolher_aba("conexao")))
             if resultado.endereco:
                 self._config.ip_reserva = resultado.endereco
                 self._conferir_gravacao(self._config.gravar())
@@ -3772,8 +4043,21 @@ class Janela(tk.Tk):
             # ja sem fio -> usa na hora, sem o passo "escolha qual usar".
             # Pelo cabo continua pedindo o clique: abrir o sem fio e mais
             # pesado e so faz sentido quando ele quer.
-            if len(self._achados) == 1 and self._achados[0].sem_fio:
+            if len(self._achados) == 1 and (
+                    self._achados[0].sem_fio or
+                    self.programa.conexao_preferida() == "cabo") and \
+                    not self.programa.celular:
                 self._usar(self._achados[0])
+                return
+            if self.programa.celular or (
+                    not self._achados and
+                    "permitir" not in resultado.texto.lower()):
+                # (r193) A lista basta: sem "achei N celulares" no status, e
+                # sem "nenhum celular" (a coluna da esquerda ja diz). Fica
+                # so o aviso de tocar em Permitir no celular.
+                self._pintar_status("")
+                self._mostrar_achados()
+                self._repintar()
                 return
             self._pintar_status(resultado.texto.lower(),
                                 E.TEXTO_2 if resultado.ok else E.ALERTA)
@@ -3859,68 +4143,154 @@ class Janela(tk.Tk):
                     lambda v: self._virar_opcao("abrir_janela_ao_iniciar", v),
                     explicacao="desligado: abre só na bandeja", borda=False)
 
-        E.Rotulo(dir_, "pasta do scrcpy").pack(side="top", fill="x",
-                                               pady=(E.px(0), E.px(6)))
-        pasta = self._config.scrcpy or "(nenhuma escolhida)"
-        tk.Label(dir_, text=pasta, bg=E.FUNDO_FUNDO, fg=E.TEXTO,
-                 font=E.fonte(E.PEQUENA), anchor="w", justify="left",
-                 wraplength=E.px(220), padx=E.px(8), pady=E.px(6), highlightthickness=1,
-                 highlightbackground=E.LINHA).pack(side="top", fill="x")
+        self._coluna_atualizacoes(dir_)
+
+    # -- OPCOES > geral, coluna da direita: ATUALIZACOES (r195) ----------------
+    #
+    # Pedido dele (30/set/2026): "mais bonita e facil de entender". Antes: a
+    # pasta em 4 linhas no topo, um botao "procurar atualizacao" embaixo da
+    # PASTA (mas procurava os dois programas), um rotulo com o mesmo nome do
+    # botao, o resultado num texto so e a versao do scrcpy-f cortada no pe.
+    # Agora, na ordem da pergunta que ele faz ("estou em dia?"):
+    #   1. ATUALIZACOES: tabela scrcpy-f / scrcpy com a versao e o estado de
+    #      cada um (verde em dia, laranja versao nova + "atualizar");
+    #   2. quando conferiu + o botao (PROCURAR AGORA; sem scrcpy, INSTALAR
+    #      O SCRCPY e o principal);
+    #   3. PROCURAR SOZINHO: diario / semanal / mensal / nunca;
+    #   4. PASTA DO SCRCPY numa linha (meio encurtado) + "trocar".
+
+    def _coluna_atualizacoes(self, dir_) -> None:
         ok, texto = conexao.conferir_pasta(self._config.scrcpy)
-        cor = E.VERDE if ok else (E.APAGADO if not self._config.scrcpy
-                                  else E.ERRO)
-        s = E.Texto(dir_, ("✓  " if ok else ("" if not self._config.scrcpy
-                                             else "✗  ")) + texto.lower(),
-                    cor=cor, largura=E.px(230))
-        s.pack(side="top", fill="x", pady=(E.px(6), E.px(0)))
-        self._ui["status_pasta"] = s
-        andamento = getattr(self, "_instalar_texto", None)
-        if andamento:                       # (r166) instalando agora
-            s.configure(text=andamento[0], fg=andamento[1])
-        botoes = tk.Frame(dir_, bg=E.FUNDO)
-        botoes.pack(side="top", fill="x", pady=(E.px(10), E.px(0)))
-        # (r166) INSTALAR E O PRINCIPAL; "usar outra pasta" fica pequeno,
-        # para quem nao tem administrador, nao alcanca o GitHub ou quer uma
-        # versao especifica do scrcpy (decisao dele, 25/set/2026).
-        # (r175) Com o scrcpy ja funcionando o botao vira "procurar
-        # atualizacao" (pedido dele: clicar de novo reinstalava a mesma).
+        E.Rotulo(dir_, "atualizações").pack(side="top", fill="x",
+                                            pady=(E.px(0), E.px(6)))
+        tabela = tk.Frame(dir_, bg=E.LINHA)
+        tabela.pack(side="top", fill="x")
+        linhas = {}
+        for n, (chave, nome) in enumerate((("app", "scrcpy-f"),
+                                           ("scrcpy", "scrcpy"))):
+            lin = tk.Frame(tabela, bg=E.FUNDO_FUNDO)
+            lin.pack(side="top", fill="x", padx=1,
+                     pady=(1, 1) if n == 0 else (0, 1))
+            tk.Label(lin, text=nome, bg=E.FUNDO_FUNDO, fg=E.TEXTO,
+                     font=E.fonte(E.PEQUENA), anchor="w", width=9).pack(
+                side="left", padx=(E.px(8), E.px(0)), pady=E.px(6))
+            versao = tk.Label(lin, text="", bg=E.FUNDO_FUNDO, fg=E.TEXTO_2,
+                              font=E.fonte(E.PEQUENA), anchor="w", width=7)
+            versao.pack(side="left")
+            estado = tk.Label(lin, text="", bg=E.FUNDO_FUNDO,
+                              font=E.fonte(E.PEQUENA), anchor="e",
+                              takefocus=0, highlightthickness=1,
+                              highlightbackground=E.FUNDO_FUNDO,
+                              highlightcolor=E.ACENTO)
+            estado.pack(side="right", padx=(E.px(0), E.px(8)))
+            estado.bind("<Button-1>", lambda _e, w=estado: self._clicou_estado(w))
+            estado.bind("<Return>", lambda _e, w=estado: self._clicou_estado(w))
+            estado.bind("<space>", lambda _e, w=estado: self._clicou_estado(w))
+            linhas[chave] = (versao, estado)
+        self._ui["upd_linhas"] = linhas
+
+        acao = tk.Frame(dir_, bg=E.FUNDO)
+        acao.pack(side="top", fill="x", pady=(E.px(8), E.px(0)))
         if ok:
-            E.Botao(botoes, "procurar atualização", self._procurar_agora,
-                    tipo="acao").pack(side="left")
-        else:
-            E.Botao(botoes, "instalar", self._baixar,
-                    tipo="acao").pack(side="left")
-        outra = tk.Label(dir_, text="usar outra pasta", bg=E.FUNDO,
-                         fg=E.APAGADO, font=E.fonte(E.PEQUENA), anchor="w",
-                         cursor="hand2")
-        outra.pack(side="top", fill="x", pady=(E.px(8), E.px(0)))
-        outra.bind("<Button-1>", lambda _e: self._escolher_pasta())
-        outra.bind("<Enter>", lambda _e: outra.configure(fg=E.TEXTO))
-        outra.bind("<Leave>", lambda _e: outra.configure(fg=E.APAGADO))
-        # (r167) ATUALIZACAO: prazo da procura + procurar agora.
-        E.Rotulo(dir_, "procurar atualização").pack(
+            E.Botao(acao, "procurar agora", self._procurar_agora,
+                    tipo="contorno").pack(side="right")
+        # Quando conferiu -- ou, instalando, o andamento (acima do botao,
+        # a vista; embaixo da pasta ele passava da borda da janela).
+        quando = tk.Label(acao, text="", bg=E.FUNDO, fg=E.TEXTO_2,
+                          font=E.fonte(E.PEQUENA), anchor="w",
+                          justify="left",
+                          wraplength=E.px(140 if ok else 230))
+        quando.pack(side="left", fill="x")
+        self._ui["procura"] = quando
+        if not ok:
+            # (r166) Sem scrcpy, INSTALAR e o principal da tela inteira.
+            E.Botao(dir_, "instalar o scrcpy", self._baixar,
+                    tipo="acao").pack(side="top", fill="x",
+                                      pady=(E.px(8), E.px(0)))
+
+        E.Rotulo(dir_, "procurar sozinho").pack(
             side="top", fill="x", pady=(E.px(14), E.px(6)))
-        E.Segmentado(dir_, (("diario", "dia"), ("semanal", "semana"),
-                            ("mensal", "mês"), ("nunca", "nunca")),
+        E.Segmentado(dir_, (("diario", "diário"), ("semanal", "semanal"),
+                            ("mensal", "mensal"), ("nunca", "nunca")),
                      self.programa.prazo_atualizacao(),
                      self._escolheu_prazo).pack(side="top", fill="x")
-        # (r175) O "procurar agora" virou o botao de cima; aqui fica so o
-        # resultado da ultima procura (ou, sem scrcpy, o link de procurar).
-        agora = tk.Label(dir_, text=getattr(self, "_procura_texto", None)
-                         or ("" if ok else "procurar agora"), bg=E.FUNDO,
-                         fg=E.APAGADO, font=E.fonte(E.PEQUENA), anchor="w",
-                         cursor="arrow" if ok else "hand2")
-        agora.pack(side="top", fill="x", pady=(E.px(6), E.px(0)))
-        if not ok:
-            agora.bind("<Button-1>", lambda _e: self._procurar_agora())
-            agora.bind("<Enter>", lambda _e: agora.configure(fg=E.TEXTO))
-            agora.bind("<Leave>", lambda _e: agora.configure(fg=E.APAGADO))
-        self._ui["procura"] = agora
-        # side=bottom empilha de baixo para cima: o numero entra primeiro
-        tk.Label(dir_, text="scrcpy-f %s" % VERSAO, bg=E.FUNDO, fg=E.TEXTO_2,
-                 font=E.fonte(E.PEQUENA), anchor="w").pack(side="bottom",
-                                                           fill="x")
-        E.Rotulo(dir_, "versão").pack(side="bottom", fill="x", pady=(E.px(0), E.px(2)))
+
+        topo = tk.Frame(dir_, bg=E.FUNDO)
+        topo.pack(side="top", fill="x", pady=(E.px(14), E.px(4)))
+        E.Rotulo(topo, "pasta do scrcpy").pack(side="left")
+        # (r166) "usar outra pasta" pequeno: para quem nao tem
+        # administrador, nao alcanca o GitHub ou quer outra versao.
+        self._link(topo, "trocar" if self._config.scrcpy else
+                   "usar outra pasta", self._escolher_pasta).pack(
+            side="right")
+        tk.Label(dir_, text=_encurtar_caminho(self._config.scrcpy or
+                                      "nenhuma escolhida", 34),
+                 bg=E.FUNDO, fg=E.TEXTO_2 if self._config.scrcpy
+                 else E.APAGADO, font=E.fonte(E.PEQUENA),
+                 anchor="w").pack(side="top", fill="x")
+        # So o erro de uma pasta escolhida (sem pasta, "nenhuma escolhida"
+        # ja diz) e o andamento do instalar.
+        s = E.Texto(dir_, texto.lower() if self._config.scrcpy and not ok
+                    else "", cor=E.ERRO, largura=E.px(230))
+        s.pack(side="top", fill="x", pady=(E.px(4), E.px(0)))
+        self._ui["status_pasta"] = s
+        self._pintar_atualizacoes()
+
+    def _pintar_atualizacoes(self) -> None:
+        linhas = self._ui.get("upd_linhas")
+        if not linhas or not linhas["app"][0].winfo_exists():
+            return
+        p = self.programa
+        ok, _t = conexao.conferir_pasta(self._config.scrcpy)
+        v_scrcpy = getattr(p, "_versao_scrcpy", None)
+        if ok and v_scrcpy is None and not getattr(self, "_lendo_versao",
+                                                   False):
+            self._lendo_versao = True
+
+            def ler():
+                try:
+                    p.versao_do_scrcpy_guardada()
+                finally:
+                    self._da_outra_thread.put(lambda: (
+                        setattr(self, "_lendo_versao", False),
+                        self._pintar_atualizacoes()))
+            threading.Thread(target=ler, daemon=True,
+                             name="versao-scrcpy").start()
+        procurando = getattr(self, "_procurando", False)
+        versoes = {"app": VERSAO,
+                   "scrcpy": (v_scrcpy or "…") if ok else "—"}
+        for chave, (versao, estado) in linhas.items():
+            versao.configure(text=versoes[chave])
+            tipo, texto = p.estado_atualizacao.get(chave, ("info", ""))
+            if chave == "scrcpy" and not ok:
+                tipo, texto = "falta", "não instalado"
+            elif procurando:
+                tipo, texto = "info", "procurando…"
+            cor = {"ok": E.VERDE, "nova": E.ACENTO, "erro": E.ALERTA,
+                   "falta": E.ALERTA}.get(tipo, E.APAGADO)
+            marca = {"ok": "✓  ", "nova": "●  ", "erro": "!  ",
+                     "falta": ""}.get(tipo, "")
+            clicavel = tipo == "nova" and not procurando
+            estado.configure(
+                text=marca + texto + ("  ›" if clicavel else ""), fg=cor,
+                cursor="hand2" if clicavel else "arrow",
+                takefocus=1 if clicavel else 0)
+            estado._clicavel = clicavel
+        quando = self._ui.get("procura")
+        if quando is not None and quando.winfo_exists():
+            andamento = getattr(self, "_instalar_texto", None)
+            if andamento:                   # (r166) instalando / falhou
+                quando.configure(text=andamento[0], fg=andamento[1])
+            else:
+                quando.configure(text=_quando(self._config.opcoes.get(
+                    "ultima_procura")), fg=E.TEXTO_2)
+
+    def _clicou_estado(self, rotulo) -> str:
+        # Versao nova: procurar de novo JA, que pergunta (manual ignora o
+        # "nao" dado antes) e atualiza com o sim.
+        if getattr(rotulo, "_clicavel", False):
+            self._procurar_agora()
+        return "break"
 
     # -- OPCOES > qualidade (23/set/2026) -------------------------------------
     #
@@ -3928,17 +4298,38 @@ class Janela(tk.Tk):
     # e apps), com tres predefinicoes fixas e ate tres dele, que so aparecem
     # depois que ele criar. As fileiras ficam todas abertas.
 
+    # (r196) QUALIDADE POR CONEXAO: a fileira "sem fio | cabo" no topo
+    # escolhe QUAL conjunto a tela mostra e edita (nao muda a conexao). Abre
+    # no da conexao em uso. Criar predefinicao salva no conjunto aberto.
+
+    def _conexao_da_qualidade(self) -> str:
+        con = getattr(self, "_qual_con", None)
+        if con not in qualidade.CONEXOES:
+            con = self.programa.conexao_de()
+            self._qual_con = con
+        return con
+
+    def _escolheu_con_da_qualidade(self, con: str) -> None:
+        self._qual_con = con
+        self._renomeando = None
+        self._montar_conteudo()
+
     def _tela_opcoes_qualidade(self, area) -> None:
         q = self._config.qualidade
+        con = self._conexao_da_qualidade()
+        base = qualidade.conjunto(q, con)
         f = self._uma(area)
-        lista = qualidade.todas_predef(q)
-        atual = qualidade.predef_atual(q)
+        lista = qualidade.todas_predef(q, con)
+        atual = qualidade.predef_atual(q, con)
         minha = next((x for x in lista if x[0] == atual and not x[4]), None)
         n_minhas = sum(1 for x in lista if not x[4])
 
         topo = tk.Frame(f, bg=E.FUNDO)
         topo.pack(side="top", fill="x", pady=(E.px(0), E.px(6)))
-        E.Rotulo(topo, "predefinição").pack(side="left")
+        E.Rotulo(topo, "predefinições").pack(side="left")
+        E.Segmentado(topo, [("sem_fio", "sem fio"), ("cabo", "cabo")], con,
+                     self._escolheu_con_da_qualidade).pack(
+            side="left", padx=(E.px(10), E.px(0)))
         if minha is not None:
             E.Botao(topo, "apagar", lambda: self._apagar_predef(minha[0]),
                     tipo="discreto").pack(side="right")
@@ -3970,35 +4361,43 @@ class Janela(tk.Tk):
             elif minha is not None:
                 texto = "sua · o que mudar abaixo fica gravado nela."
             else:
-                texto = (qualidade.texto_do_nivel("video", {
-                    "equilibrado": "padrao"}.get(atual, atual)).lower() +
-                    " fixa: mudar abaixo cria uma ajustada à mão.")
+                texto = (qualidade.TEXTO_DAS_FIXAS.get(atual, "") +
+                         " fixa: mudar abaixo cria uma ajustada à mão.")
             E.Texto(f, texto, cor=E.APAGADO, tamanho=E.ROTULO,
                     largura=E.px(560)).pack(side="top", fill="x",
-                                            pady=(E.px(6), E.px(0)))
+                                            pady=(E.px(4), E.px(0)))
 
+        # (r198) LETRA MAIOR: esta tela ja estava no limite. A coluna da
+        # imagem ganha largura (a resolucao tem 5 opcoes; o som, no maximo
+        # 4) e os espacos entre fileiras encolhem, para tudo caber.
         colunas = tk.Frame(f, bg=E.FUNDO)
         colunas.pack(side="top", fill="both", expand=True,
-                     pady=(E.px(10), E.px(0)))
+                     pady=(E.px(6), E.px(0)))
         esq = tk.Frame(colunas, bg=E.FUNDO)
         dir_ = tk.Frame(colunas, bg=E.FUNDO)
-        esq.place(relx=0, rely=0, relwidth=0.5, relheight=1.0, width=-E.px(8))
-        dir_.place(relx=0.5, rely=0, relwidth=0.5, relheight=1.0,
+        corte = 0.57
+        esq.place(relx=0, rely=0, relwidth=corte, relheight=1.0,
+                  width=-E.px(8))
+        dir_.place(relx=corte, rely=0, relwidth=1 - corte, relheight=1.0,
                    x=E.px(8), width=-E.px(8))
-        video, audio = q.get("video") or {}, q.get("audio") or {}
+        video, audio = base.get("video") or {}, base.get("audio") or {}
         E.Rotulo(esq, "imagem").pack(side="top", fill="x",
-                                     pady=(E.px(0), E.px(6)))
+                                     pady=(E.px(0), E.px(4)))
         for ajuste in qualidade.AJUSTES_VIDEO:
             campo = ajuste["campo"]
             if campo == "resolucao":
                 # (r189) em "p", so as que a tela do celular tem.
                 ajuste = dict(ajuste, opcoes=qualidade.opcoes_de_resolucao(
                     self.programa.celular))
+            elif campo == "bitrate":
+                # (r196) 32 e 40 so no conjunto do cabo.
+                ajuste = dict(ajuste, opcoes=qualidade.taxas_de_video(con))
             self._fila(esq, NOME_CURTO.get(("video", campo), campo),
                        self._opcoes_curtas(ajuste), video.get(campo),
-                       lambda v, c=campo: self._escolheu_qualidade("video", c, v))
+                       lambda v, c=campo: self._escolheu_qualidade("video", c, v),
+                       espaco=4, nome_larg=10)
         E.Rotulo(dir_, "som").pack(side="top", fill="x",
-                                   pady=(E.px(0), E.px(6)))
+                                   pady=(E.px(0), E.px(4)))
         for ajuste in qualidade.AJUSTES_AUDIO:
             campo = ajuste["campo"]
             if campo == "origem":
@@ -4006,22 +4405,30 @@ class Janela(tk.Tk):
             s = self._fila(dir_, NOME_CURTO.get(("audio", campo), campo),
                            self._opcoes_curtas(ajuste), audio.get(campo),
                            lambda v, c=campo: self._escolheu_qualidade(
-                               "audio", c, v))
+                               "audio", c, v), espaco=4, nome_larg=10)
             if campo == "bitrate" and audio.get("codec") in qualidade.SEM_TAXA:
                 s.habilitar(False)
-        E.Texto(dir_, "vale para espelhar, extensão e apps. um app pode ter a "
-                      "sua em apps › personalizados.", cor=E.APAGADO,
-                tamanho=E.ROTULO, largura=E.px(250)).pack(
-            side="top", fill="x", pady=(E.px(8), E.px(0)))
+        E.Texto(dir_, "vale para espelhar, extensão e apps quando o celular "
+                      "estiver %s. cada um pode ter a sua (espelhar, extensão, "
+                      "apps › personalizados)." % (
+                          "pelo cabo" if con == "cabo" else "sem fio"),
+                cor=E.APAGADO, tamanho=E.ROTULO, largura=E.px(200)).pack(
+            side="top", fill="x", pady=(E.px(6), E.px(0)))
 
     def _qualidade_mudou(self, ok: bool, o_que: str) -> None:
-        self.programa.anotar("qualidade: %s%s" % (o_que,
-                                                  "" if ok else " (NAO GRAVOU)"))
+        con = self._conexao_da_qualidade()
+        self.programa.anotar("qualidade (%s): %s%s" % (
+            con, o_que, "" if ok else " (NAO GRAVOU)"))
         self._conferir_gravacao(ok)
+        # (r196) So o que esta NESTA conexao muda (o conjunto do cabo nao
+        # mexe num espelhamento sem fio, e vice-versa).
+        p = self.programa
         for nome in ("jogo", "extensao"):
-            self.programa.mudou_a_qualidade(nome)
+            if p.na_conexao(nome, con):
+                p.mudou_a_qualidade(nome)
         # A qualidade de OPCOES tambem e a dos apps (r123).
-        self._agendar_reabrir(self.programa.apps_abertos())
+        self._agendar_reabrir({a for a in p.apps_abertos()
+                               if p.na_conexao(APP + a, con)})
         self._montar_conteudo()
 
     def _escolheu_predef(self, ident: str) -> None:
@@ -4030,12 +4437,12 @@ class Janela(tk.Tk):
                               "predefinicao %s" % ident)
 
     def _escolheu_qualidade(self, secao: str, campo: str, valor) -> None:
-        self._qualidade_mudou(self._config.definir_qualidade(secao, campo,
-                                                             valor),
-                              "%s.%s = %s" % (secao, campo, valor))
+        self._qualidade_mudou(self._config.definir_qualidade(
+            secao, campo, valor, self._conexao_da_qualidade()),
+            "%s.%s = %s" % (secao, campo, valor))
 
     def _nova_predef(self) -> None:
-        ident = self._config.criar_predef()
+        ident = self._config.criar_predef(self._conexao_da_qualidade())
         self._renomeando = ident          # ja abre a caixa do nome
         self._qualidade_mudou(ident is not None, "nova predefinicao %s" % ident)
 
@@ -4146,25 +4553,24 @@ class Janela(tk.Tk):
         self._instalando = True
         self.programa.anotar("instalar scrcpy: pedido pela janela")
 
+        # (r195) O andamento aparece na linha de cima da coluna, a do
+        # "conferido" (ver `_pintar_atualizacoes`).
         def mostrar(texto, cor=None):
             self._instalar_texto = (texto, cor or E.TEXTO_2) if texto else None
-            s = self._ui.get("status_pasta")
-            if s is not None and s.winfo_exists():
-                s.configure(text=texto, fg=cor or E.TEXTO_2)
+            self._pintar_atualizacoes()
 
         def avisar(texto):
             self._da_outra_thread.put(lambda t=texto: mostrar(t))
 
         def fim(ok, texto):
             self._instalando = False
-            self._instalar_texto = None
             if ok:
+                # A tabela diz "em dia"; o texto volta ao "conferido".
+                self._instalar_texto = None
                 self._montar_conteudo()
-                mostrar("✓  " + texto, E.VERDE)
-                self._instalar_texto = None
             else:
-                mostrar("✗  " + texto, E.ERRO)
-                self._instalar_texto = None
+                # O erro fica ate o proximo clique em instalar.
+                mostrar("✗  " + texto.lower(), E.ERRO)
 
         def trabalho():
             try:
@@ -4257,25 +4663,18 @@ class Janela(tk.Tk):
         if getattr(self, "_procurando", False):
             return
         self._procurando = True
-
-        def mostrar(texto):
-            self._procura_texto = texto
-            r = self._ui.get("procura")
-            if r is not None and r.winfo_exists():
-                r.configure(text=texto)
-
         pasta_antes = self._config.scrcpy
 
         def fim(texto):
+            # (r195) O resultado vai para a tabela (um estado por programa,
+            # `programa.estado_atualizacao`), nao mais num texto so.
             self._procurando = False
+            self.programa.anotar("procurar atualizacao: %s" % texto)
             if self._config.scrcpy != pasta_antes:
                 # Instalou/atualizou: a pasta mudou, a tela e refeita.
-                self._procura_texto = texto
                 self._montar_conteudo()
-                self._procura_texto = None
             else:
-                mostrar(texto)             # (r180) no lugar, sem piscar
-                self._procura_texto = None
+                self._pintar_atualizacoes()   # (r180) no lugar, sem piscar
 
         def trabalho():
             try:
@@ -4285,7 +4684,7 @@ class Janela(tk.Tk):
                 texto = "algo deu errado: %s" % erro
             self._da_outra_thread.put(lambda: fim(texto))
 
-        mostrar("procurando…")
+        self._pintar_atualizacoes()
         threading.Thread(target=trabalho, daemon=True,
                          name="procurar").start()
 
@@ -4302,6 +4701,8 @@ class Janela(tk.Tk):
         if ok:
             self._config.scrcpy = str(pasta)
             self._conferir_gravacao(self._config.gravar())
+            self.programa._versao_scrcpy = None     # (r195) outra pasta
+            self.programa.estado_atualizacao.pop("scrcpy", None)
             self._montar_conteudo()
             return
         s = self._ui.get("status_pasta")
@@ -4819,6 +5220,16 @@ class Janela(tk.Tk):
                         acao.definir(botao, tipo, ligado)
 
         self._pintar_info_celular()
+        self._pintar_conexao()
+        self._pintar_celular_em_uso()
+        self._conferir_outros()
+        if self._item == "opcoes":
+            self._pintar_atualizacoes()     # (r195) a procura do prazo
+        self._seguir_a_conexao()            # (r197)
+        em_uso = cel.get("serial", "")
+        if em_uso != getattr(self, "_lista_feita_para", None):
+            self._lista_feita_para = em_uso
+            self._mostrar_achados()
 
         icone = p.estado_do_icone()
         if icone != self._estado_do_icone:
@@ -5405,6 +5816,34 @@ class _Rolagem:
 def _gb(n: float) -> str:
     """Bytes em GB, com virgula: 59177504768 -> "55,1 GB"."""
     return ("%.1f GB" % (n / 1024 ** 3)).replace(".", ",")
+
+
+def _encurtar_caminho(texto: str, n: int) -> str:
+    """(r195) Caminho numa linha: tira do MEIO (comeco e pasta final ficam).
+    O `_encurtar` de cima corta o FIM (nomes de app)."""
+    texto = str(texto)
+    if len(texto) <= n:
+        return texto
+    fim = n * 2 // 3
+    return texto[:n - fim - 1] + "…" + texto[-fim:]
+
+
+def _quando(epoch) -> str:
+    """(r195) "conferido hoje às 14:32" / "ontem" / "em 28/09"."""
+    try:
+        t = float(epoch or 0)
+    except (TypeError, ValueError):
+        t = 0
+    if t <= 0:
+        return "ainda não conferido."
+    import datetime
+    d = datetime.datetime.fromtimestamp(t)
+    hoje = datetime.date.today()
+    if d.date() == hoje:
+        return "conferido hoje às %s." % d.strftime("%H:%M")
+    if (hoje - d.date()).days == 1:
+        return "conferido ontem às %s." % d.strftime("%H:%M")
+    return "conferido em %s." % d.strftime("%d/%m")
 
 
 def _mb(n: float) -> str:

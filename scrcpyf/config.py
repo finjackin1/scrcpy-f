@@ -395,10 +395,18 @@ class Config:
 
     # -- qualidade unica -------------------------------------------------------
 
-    def definir_qualidade(self, secao: str, campo: str, valor) -> bool:
+    # (r196) Tudo por CONEXAO ("sem_fio" = o `qualidade` de sempre, "cabo" =
+    # `qualidade["cabo"]`); ver `qualidade.conjunto`.
+
+    def _conj(self, conexao: str) -> dict:
+        from . import qualidade as _q
+        return _q.conjunto(self.qualidade, conexao)
+
+    def definir_qualidade(self, secao: str, campo: str, valor,
+                          conexao: str = "sem_fio") -> bool:
         """Uma fileira de OPCOES > qualidade. Com uma predefinicao DELE
         escolhida, grava nela tambem; com uma fixa, deixa de estar nela."""
-        q = self.qualidade
+        q = self._conj(conexao)
         q.setdefault(secao, {})[campo] = valor
         minha = self._minha(q.get("escolhida"))
         if minha is not None:
@@ -408,36 +416,46 @@ class Config:
         return self.gravar()
 
     def escolher_predef(self, ident: str) -> bool:
+        """A escolhida do conjunto a que a predefinicao pertence."""
         from . import qualidade as _q
         video, audio = _q.valores_da_predef(self.qualidade, ident)
-        if video is None:
+        conexao = _q.conexao_da_predef(self.qualidade, ident)
+        if video is None or conexao is None:
             return False
-        self.qualidade["video"] = dict(video)
-        self.qualidade["audio"] = dict(audio)
-        self.qualidade["escolhida"] = ident
+        q = self._conj(conexao)
+        q["video"] = dict(video)
+        q["audio"] = dict(audio)
+        q["escolhida"] = ident
         return self.gravar()
 
     def _minha(self, ident):
-        for m in self.qualidade.get("minhas") or []:
-            if isinstance(m, dict) and m.get("id") == ident:
-                return m
+        """A predefinicao DELE com esse id, de qualquer conjunto."""
+        from . import qualidade as _q
+        for con in _q.CONEXOES:
+            for m in self._conj(con).get("minhas") or []:
+                if isinstance(m, dict) and m.get("id") == ident:
+                    return m
         return None
 
-    def criar_predef(self) -> str | None:
-        """Salva a qualidade de agora como predefinicao dele (max. 3)."""
+    def criar_predef(self, conexao: str = "sem_fio") -> str | None:
+        """Salva a qualidade de agora (do conjunto da `conexao`) como
+        predefinicao dele (max. 3 por conexao)."""
         from . import qualidade as _q
-        minhas = self.qualidade.setdefault("minhas", [])
+        q = self._conj(conexao)
+        minhas = q.setdefault("minhas", [])
         if len(minhas) >= _q.MAX_MINHAS:
             return None
+        letra = "c" if conexao == "cabo" else "p"
         usados = {m.get("id") for m in minhas}
-        ident = next("p%d" % i for i in range(1, 10) if "p%d" % i not in usados)
+        ident = next("%s%d" % (letra, i) for i in range(1, 10)
+                     if "%s%d" % (letra, i) not in usados)
         nomes = {m.get("nome") for m in minhas}
         nome = next("minha %d" % i for i in range(1, 10)
                     if "minha %d" % i not in nomes)
         minhas.append({"id": ident, "nome": nome,
-                       "video": dict(self.qualidade.get("video") or {}),
-                       "audio": dict(self.qualidade.get("audio") or {})})
-        self.qualidade["escolhida"] = ident
+                       "video": dict(q.get("video") or {}),
+                       "audio": dict(q.get("audio") or {})})
+        q["escolhida"] = ident
         self.gravar()
         return ident
 
@@ -450,17 +468,21 @@ class Config:
         return self.gravar()
 
     def apagar_predef(self, ident: str) -> bool:
-        minhas = self.qualidade.get("minhas") or []
-        self.qualidade["minhas"] = [m for m in minhas if m.get("id") != ident]
-        if self.qualidade.get("escolhida") == ident:
-            self.qualidade["escolhida"] = None
-        # Modos e apps que usavam essa predefinicao voltam ao padrao.
-        for perfil in self.perfis.values():
-            if isinstance(perfil, dict) and perfil.get("predef") == ident:
-                perfil.pop("predef", None)
-        for conf in (self.apps.get("por_app") or {}).values():
-            if isinstance(conf, dict) and conf.get("predef") == ident:
-                conf.pop("predef", None)
+        from . import qualidade as _q
+        for con in _q.CONEXOES:
+            q = self._conj(con)
+            minhas = q.get("minhas") or []
+            q["minhas"] = [m for m in minhas if m.get("id") != ident]
+            if q.get("escolhida") == ident:
+                q["escolhida"] = None
+        # Modos e apps que usavam essa predefinicao voltam ao padrao (nas
+        # duas chaves: "predef" = sem fio, "predef_cabo" = cabo).
+        for dono in list(self.perfis.values()) + list(
+                (self.apps.get("por_app") or {}).values()):
+            if isinstance(dono, dict):
+                for chave in _q.CHAVES_PREDEF.values():
+                    if dono.get(chave) == ident:
+                        dono.pop(chave, None)
         return self.gravar()
 
     # -- opcoes --------------------------------------------------------------

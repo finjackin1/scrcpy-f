@@ -100,7 +100,10 @@ def _escala_que_cabe(dpi: float) -> float:
 DPI = max(1.0, _dpi_do_sistema() / 96.0)
 ESCALA = _escala_que_cabe(DPI)
 # A letra: o Tk ja multiplica pontos pelo DPI; aqui entra so a escala.
-ESCALA_LETRA = ESCALA
+# (r198, pedido dele 30/set/2026: "aumente um pouco em geral") +10% so na
+# letra -- ~1 ponto em cada tamanho; as medidas e a janela ficam iguais.
+AUMENTO_LETRA = 1.1
+ESCALA_LETRA = ESCALA * AUMENTO_LETRA
 
 
 def px(n: float) -> int:

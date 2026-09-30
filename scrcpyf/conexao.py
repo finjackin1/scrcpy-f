@@ -160,6 +160,16 @@ def conectar_pelo_cabo(adb, avisar, parar: threading.Event) -> Resultado:
             time.sleep(0.8)
 
     modelo = _modelo(adb, serial) or "celular"
+    # (r192) SEM PARAR O ADB: o `tcpip` reinicia o adb DENTRO do celular e
+    # derruba tudo que esta aberto nele. Se este celular ja tem conexao sem
+    # fio de pe, nao ha nada a abrir.
+    for s, estado in _seriais(adb):
+        if estado == "device" and not _pelo_cabo(s) and \
+                _modelo(adb, s) == modelo:
+            ip = s.split(":")[0] if "._tcp" not in s.lower() else \
+                celular.endereco_na_rede(adb, s)
+            return Resultado(True, "Pronto: %s já estava conectado sem fio."
+                             % modelo, modelo=modelo, endereco=ip)
     avisar("%s encontrado. Abrindo a conexão sem fio..." % modelo)
     celular._rodar([adb, "-s", serial, "tcpip", str(PORTA_SEM_FIO)],
                    espera=15)
@@ -302,10 +312,11 @@ def procurar(adb, ip_reserva: str, avisar,
                     else _endereco_por_wlan(adb, serial))
         achado = Achado(serial, modelo, sem_fio, endereco)
         # O mesmo celular pode aparecer duas vezes (cabo E sem fio): fica a
-        # entrada sem fio, que e a que o programa usa.
+        # entrada da conexao PREFERIDA (r192), que e a que o programa usa.
         antigo = por_modelo.get(achado.modelo)
         if antigo is not None:
-            if sem_fio and not antigo.sem_fio:
+            if sem_fio != antigo.sem_fio and \
+                    sem_fio == (celular.PREFERENCIA != "cabo"):
                 achados[achados.index(antigo)] = achado
                 por_modelo[achado.modelo] = achado
             continue
