@@ -80,7 +80,8 @@ class Avisos:
         self.largura = E.px(320)
 
     def mostrar(self, app: str, nome: str, titulo: str, texto: str,
-                hora: str) -> None:
+                hora: str, dado=None) -> None:
+        """`dado` volta no clique: ao_clicar(app, dado)."""
         if not windows_aceita():
             self.anotar("aviso: o windows esta em nao perturbe/tela cheia")
             return
@@ -128,7 +129,7 @@ class Avisos:
         j._parado = False
         for w in pecas:
             w.bind("<Button-1>", lambda _e, a=app, jj=j: (
-                self._fechar(jj), self.ao_clicar(a)))
+                self._fechar(jj), self.ao_clicar(a, dado)))
         x.bind("<Button-1>", lambda _e, jj=j: self._fechar(jj))
         x.bind("<Enter>", lambda _e: x.configure(fg=E.ERRO))
         x.bind("<Leave>", lambda _e: x.configure(fg=E.APAGADO))

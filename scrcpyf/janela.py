@@ -4439,7 +4439,7 @@ class Janela(tk.Tk):
         """Um cartao: titulo, hora, x (se der para tirar) e o texto.
         Devolve (frame, assinatura, label da hora)."""
         nome = self._nome_notif(app)
-        abre = self._app_abre(app)
+        abre = n.alvo is not None or self._app_abre(app)
         card = tk.Frame(d, bg=E.FUNDO, highlightthickness=1,
                         highlightbackground=E.LINHA,
                         cursor="hand2" if abre else "arrow")
@@ -4475,7 +4475,8 @@ class Janela(tk.Tk):
         tk.Frame(card, bg=E.FUNDO, height=E.px(5)).pack(side="top")
         if abre:
             for w in pecas:
-                w.bind("<Button-1>", lambda _e, a=app: self._abrir_notif(a))
+                w.bind("<Button-1>", lambda _e, a=app, k=n.chave:
+                       self._abrir_notif(a, k))
                 w.bind("<Enter>", lambda _e: card.configure(
                     highlightbackground=E.ACENTO), add="+")
                 w.bind("<Leave>", lambda _e: card.configure(
@@ -4701,9 +4702,13 @@ class Janela(tk.Tk):
         self._ui["notif_pintada"] = None
         self._pintar_notif()
 
-    def _abrir_notif(self, app: str) -> None:
-        if self._app_abre(app):
-            self.programa.abrir_pela_notificacao(app)
+    def _abrir_notif(self, app: str, chave: str = "") -> None:
+        """(01/out) Clique no cartao: o que o toque no celular abriria (o
+        destino e lido na hora: a notificacao pode ter mudado de alvo)."""
+        alvo = next((n.alvo for n in self.programa.notif.todas()
+                     if n.chave == chave), None)
+        if alvo is not None or self._app_abre(app):
+            self.programa.abrir_pela_notificacao(app, alvo)
 
     HORAS_A_CADA_S = 20.0
 
@@ -4726,13 +4731,16 @@ class Janela(tk.Tk):
         for n in novas[-3:]:
             self._avisos.mostrar(n.app, self._nome_notif(n.app), n.titulo,
                                  n.texto or n.subtexto,
-                                 self._quando_notif(n.quando))
+                                 self._quando_notif(n.quando), dado=n.chave)
 
-    def _clicou_aviso(self, app: str) -> None:
-        """Clique no aviso: o app numa janela do PC; app que nao abre em
-        janela (do sistema) -> esta janela, nas notificacoes."""
-        if self._app_abre(app):
-            self.programa.abrir_pela_notificacao(app)
+    def _clicou_aviso(self, app: str, chave: str = "") -> None:
+        """Clique no aviso: o que o toque no celular abriria, numa janela do
+        PC; sem destino e sem janela possivel -> esta janela, nas
+        notificacoes."""
+        alvo = next((n.alvo for n in self.programa.notif.todas()
+                     if n.chave == chave), None)
+        if alvo is not None or self._app_abre(app):
+            self.programa.abrir_pela_notificacao(app, alvo)
         else:
             self.abrir_em("notif", "lista")
             self.mostrar()

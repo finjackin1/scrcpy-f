@@ -895,6 +895,34 @@ class Programa:
         pid = getattr(sessao, "pid", 0) if sessao is not None else 0
         return janela_scrcpy.achar(pid) if pid else None
 
+    def _icones_das_notificacoes(self) -> None:
+        """(01/out) O icone de quem manda notificacao e nao esta na lista de
+        apps (o "sistema android", a interface do sistema...): pedido ao
+        celular uma vez por pacote; a janela ve pelo `icones_versao`."""
+        pedidos = self.__dict__.setdefault("_icones_notif_pedidos", set())
+        try:
+            pasta = self.pasta_de_icones()
+        except Exception:
+            return
+        faltam = sorted({n.app for n in self.notif.todas()
+                         if n.app not in pedidos
+                         and not (pasta / (n.app + ".png")).exists()})
+        if not faltam:
+            return
+        pedidos.update(faltam)
+
+        def buscar():
+            try:
+                if self.buscar_icones(faltam):
+                    self.icones_versao = getattr(self, "icones_versao", 0) + 1
+                    self.anotar("icones das notificacoes: %s" % ", ".join(
+                        faltam)[:200])
+            except Exception:
+                log.exception("icones das notificacoes")
+
+        threading.Thread(target=buscar, daemon=True,
+                         name="icones-notif").start()
+
     def _pode_avisar_notif(self, app: str) -> bool:
         """(01/out) Sem aviso se o app ja esta aberto numa janela do PC e na
         frente (ele ja esta vendo). Chamado da thread das notificacoes."""
@@ -904,14 +932,105 @@ class Programa:
         hwnd = self._janela_da_sessao(APP + app)
         return not hwnd or janela_scrcpy.frente() != hwnd
 
-    def abrir_pela_notificacao(self, app: str) -> None:
-        """(01/out) Clique numa notificacao: o app numa janela do PC (aberto
-        -> vem para a frente)."""
-        nome = (self.config.apps.get("nomes") or {}).get(app) or \
+    def _nome_do_app(self, app: str) -> str:
+        return (self.config.apps.get("nomes") or {}).get(app) or \
             next((a[0] for a in (getattr(self, "apps_do_celular", None) or [])
                   if a[1] == app), app)
+
+    def abrir_pela_notificacao(self, app: str, alvo=None) -> None:
+        """
+        (01/out) Clique numa notificacao: abre O QUE O TOQUE NO CELULAR
+        ABRIRIA (pedido dele), numa janela do PC. O destino vem do
+        `dumpsys activity intents` (numa thread); a janela e a do app de
+        destino (a do sistema android abre as Configuracoes). Sem destino
+        que de para abrir: o app, como antes.
+        """
         self.anotar("notificacao: abrir %s" % app)
-        self.abrir_ou_trazer(app, nome)
+        threading.Thread(target=self._abrir_destino, args=(app, alvo),
+                         daemon=True, name="notif-abrir").start()
+
+    def _abrir_destino(self, app: str, alvo) -> None:
+        from . import notificacoes
+        destino = self.notif.destino(alvo) if alvo else {}
+        pacote, usuario = separar_app(app)
+        if destino.get("tipo") == "startActivity":
+            alvo_pkg = notificacoes.pacote_do_destino(destino)
+            serial = self._em_uso_pronto()
+            if not alvo_pkg and destino.get("act") and serial:
+                comp = self._shell(serial, "cmd package resolve-activity "
+                                   "--brief -a '%s' | tail -1"
+                                   % destino["act"], espera=8).strip()
+                alvo_pkg = comp.split("/")[0] if "/" in comp else ""
+            if alvo_pkg:
+                janela = alvo_pkg if usuario <= 0 else \
+                    "%s%s%d" % (alvo_pkg, COPIA, usuario)
+                args = notificacoes.argumentos_am(destino)
+                self.anotar("notificacao: destino %s -> janela %s (%s)"
+                            % (app, janela, " ".join(args)[:160]))
+                self.pedidos.put(("abrir_destino", janela,
+                                  self._nome_do_app(janela), args))
+                return
+        abre = any(a[1] == app for a in (getattr(self, "apps_do_celular",
+                                                 None) or []))
+        self.anotar("notificacao: sem destino de tela (%s); %s"
+                    % (destino.get("tipo") or "nao lido",
+                       "abre o app" if abre else "o app nao abre em janela"))
+        if abre:
+            self.pedidos.put(("app", app, self._nome_do_app(app)))
+
+    def _abrir_com_destino(self, janela: str, nome: str, args: list) -> None:
+        """No laco: a janela do app ja aberta recebe o destino (e vem para a
+        frente); fechada, abre ja com ele (sem o --start-app)."""
+        if self.ativo(APP + janela):
+            sessao = self.sessoes.get(APP + janela)
+            threading.Thread(target=self._abrir_intencao,
+                             args=(getattr(sessao, "serial", ""), janela,
+                                   sessao, args, True),
+                             daemon=True, name="notif-destino").start()
+            return
+        if self.ocupado(APP + janela) or not self.config.instalacao_ok:
+            return
+        self.anotar("pedido: abrir o app %s (%s) no destino da notificacao"
+                    % (nome, janela))
+        self.ligando.add(APP + janela)
+        self._tela_cheia.discard(janela)
+        self._avisar_mudanca()
+        threading.Thread(target=self._partida_app,
+                         args=(APP + janela, janela, nome),
+                         kwargs={"intencao": args}, daemon=True,
+                         name="partida-%s" % janela).start()
+
+    def _abrir_intencao(self, serial: str, chave: str, sessao, args: list,
+                        trazer: bool = False) -> None:
+        """Poe o destino da notificacao na tela virtual da janela. Recusado
+        (tela nao exportada, por exemplo): a tela de entrada do app."""
+        import shlex
+        _pacote, usuario = separar_app(chave)
+        tela = None
+        fim = time.monotonic() + 20
+        while not tela and time.monotonic() < fim and sessao is not None \
+                and sessao.rodando:
+            tela = (self._tela_da_sessao(sessao) or (None,))[0]
+            if not tela:
+                time.sleep(0.1)
+        if not tela:
+            self.anotar("notificacao %s: sem a tela da janela" % chave)
+            return
+        resp = self._shell(serial, "am start --user %d --display %s %s"
+                           % (max(usuario, 0), tela,
+                              " ".join(shlex.quote(a) for a in args)),
+                           espera=8).strip()
+        falhou = any(p in resp for p in ("Error", "Exception", "Security"))
+        self.anotar("notificacao %s: destino na tela %s -> %s"
+                    % (chave, tela, ("FALHOU: " if falhou else "") +
+                       resp.replace("\n", " ")[:160]))
+        if falhou:
+            comp = self._componente(serial, chave)
+            if comp:
+                self._shell(serial, "am start --user %d --display %s -n %s"
+                            % (max(usuario, 0), tela, comp), espera=8)
+        if trazer:
+            self.trazer_app(chave)
 
     def trazer_app(self, pacote: str) -> bool:
         """A janela do app vem para a frente (o icone dele na lista)."""
@@ -2424,7 +2543,8 @@ class Programa:
 
     def _partida_app(self, nome: str, pacote: str, rotulo: str,
                      lugar=None, serial: str = "", troca: bool = False,
-                     log_velho: str = "", tela_cheia: bool = False):
+                     log_velho: str = "", tela_cheia: bool = False,
+                     intencao=None):
         """
         `lugar` = (x, y, largura, altura) da imagem da janela velha, quando
         e um "reabrir" (ver `reabrir_app`).
@@ -2553,7 +2673,9 @@ class Programa:
                 if POLITICA_TECLADO and \
                         self._scrcpy_aceita("--display-ime-policy"):
                     extras.append("--display-ime-policy=" + POLITICA_TECLADO)
-                if not troca and COPIA not in pacote:
+                # (01/out) `intencao` = o destino de uma notificacao: a tela
+                # sobe vazia e o destino entra pelo `am start`.
+                if not troca and COPIA not in pacote and not intencao:
                     extras.append("--start-app=%s" % pacote)
                 # (r184) FORMATO E RESOLUCAO DO APP (formatos.py; antes: o
                 # "modo jogo" seguia o monitor a risca).
@@ -2605,7 +2727,12 @@ class Programa:
             if troca:
                 return sessao
             self.pedidos.put(("subiu", nome, sessao))
-            if COPIA in pacote:
+            if intencao:
+                threading.Thread(target=self._abrir_intencao,
+                                 args=(alvo, pacote, sessao, intencao),
+                                 daemon=True,
+                                 name="destino-%s" % pacote).start()
+            elif COPIA in pacote:
                 # (r186) A copia: o --start-app nao escolhe usuario; a tela
                 # virtual sobe vazia e o app entra nela pelo `am start`.
                 threading.Thread(target=self._abrir_copia,
@@ -4382,6 +4509,9 @@ class Programa:
             self._dispositivos(pedido[1])
         elif acao == "notif":
             self._avisar_mudanca()          # (01/out) contador, bolinha, aba
+            self._icones_das_notificacoes()
+        elif acao == "abrir_destino":
+            self._abrir_com_destino(pedido[1], pedido[2], pedido[3])
         elif acao == "sem_resposta":
             # (r163) Listado pelo adb mas mudo: para o programa, saiu.
             if (self.celular or {}).get("serial") == pedido[1]:

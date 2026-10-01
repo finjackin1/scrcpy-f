@@ -58,7 +58,8 @@ SERVIDOR = (
     # `</dev/null`: o `cmd` do Android repassa a entrada ao servico -- dentro
     # do lote ("G") ele nao pode ler as chaves seguintes.
     "g(){ cmd notification get \"$1\" </dev/null | sed -n -e '/^  uid=/p' "
-    "-e '/^  flags=/p' -e '/^    when=/p' -e '/^    extras={/,/^    }/p'; }; "
+    "-e '/^  flags=/p' -e '/^    when=/p' -e '/^    contentIntent=/p' "
+    "-e '/^    extras={/,/^    }/p'; }; "
     "while read c a; do case $c in "
     "l) cmd notification list </dev/null;; "
     "g) echo \"@k $a\"; g \"$a\";; "
@@ -81,7 +82,7 @@ class Notif:
     """Uma notificacao ativa no celular."""
 
     __slots__ = ("chave", "pacote", "usuario", "quando", "titulo", "texto",
-                 "subtexto", "flags", "sdk")
+                 "subtexto", "flags", "sdk", "alvo")
 
     def __init__(self, chave: str, pacote: str, usuario: int, quando: int,
                  titulo: str, texto: str, subtexto: str, flags: set) -> None:
@@ -94,6 +95,10 @@ class Notif:
         self.subtexto = subtexto
         self.flags = flags
         self.sdk = 0                      # o Android do celular (limpavel)
+        # O que o toque no celular abre: (id do PendingIntentRecord, pacote,
+        # tipo) do "contentIntent=" -- o destino de verdade se le na hora
+        # do clique (`Central.destino`). None = a notificacao nao abre nada.
+        self.alvo = None
 
     @property
     def app(self) -> str:
@@ -150,6 +155,7 @@ def ler_detalhe(chave: str, texto: str) -> Notif | None:
     pacote = partes[1]
     usuario = 0
     quando = 0
+    alvo = None
     flags: set = set()
     extras: dict = {}
     atual = None
@@ -181,15 +187,72 @@ def ler_detalhe(chave: str, texto: str) -> Notif | None:
         m = re.match(r"^    when=(\d+)", linha)
         if m:
             quando = int(m.group(1))
+            continue
+        m = re.search(r"contentIntent=PendingIntent\{\w+: PendingIntentRecord"
+                      r"\{(\w+) (\S+) (\w+)\}", linha)
+        if m:
+            alvo = (m.group(1), m.group(2), m.group(3))
     if not extras and not flags and not quando:
         return None
     titulo = _valor(extras.get("android.title", "")) or \
         _valor(extras.get("android.title.big", ""))
     texto_ = _valor(extras.get("android.bigText", "")) or \
         _valor(extras.get("android.text", ""))
-    return Notif(chave, pacote, usuario, quando or int(time.time() * 1000),
-                 titulo, texto_, _valor(extras.get("android.subText", "")),
-                 flags)
+    n = Notif(chave, pacote, usuario, quando or int(time.time() * 1000),
+              titulo, texto_, _valor(extras.get("android.subText", "")),
+              flags)
+    n.alvo = alvo
+    return n
+
+
+def ler_destino(texto: str) -> dict:
+    """
+    A linha "requestIntent=..." do `dumpsys activity intents` -> {"act",
+    "dat", "typ", "flg", "pkg", "cmp", "cat": [...]}. Os extras o Android
+    nao mostra ("(has extras)"): o destino e a tela certa, mas o que vem
+    dentro dela (a conversa exata, por exemplo) pode nao vir.
+    """
+    m = re.search(r"requestIntent=(.*)", texto)
+    if not m:
+        return {}
+    linha = m.group(1)
+    saida: dict = {"cat": []}
+    cat = re.search(r"cat=\[([^\]]*)\]", linha)
+    if cat:
+        saida["cat"] = [c.strip() for c in cat.group(1).split(",") if c.strip()]
+    for chave in ("act", "dat", "typ", "flg", "pkg", "cmp"):
+        m = re.search(r"(?:^| )%s=(\S+)" % chave, linha)
+        if m:
+            saida[chave] = m.group(1)
+    return saida
+
+
+def argumentos_am(destino: dict) -> list[str]:
+    """O destino -> argumentos do `am start` (sem --user/--display)."""
+    args: list[str] = []
+    if destino.get("act"):
+        args += ["-a", destino["act"]]
+    if destino.get("dat"):
+        args += ["-d", destino["dat"]]
+    if destino.get("typ"):
+        args += ["-t", destino["typ"]]
+    for c in destino.get("cat") or []:
+        args += ["-c", c]
+    if destino.get("cmp"):
+        args += ["-n", destino["cmp"]]
+    elif destino.get("pkg"):
+        args += ["-p", destino["pkg"]]
+    try:
+        flg = int(destino.get("flg") or "0", 16)
+    except ValueError:
+        flg = 0
+    args += ["-f", "0x%x" % (flg | 0x10000000)]       # NEW_TASK sempre
+    return args
+
+
+def pacote_do_destino(destino: dict) -> str:
+    cmp = destino.get("cmp") or ""
+    return cmp.split("/")[0] if "/" in cmp else destino.get("pkg") or ""
 
 
 def _separar_por_chave(linhas: list[str]):
@@ -601,6 +664,27 @@ class Central:
                 saida.append(self._avisos.get_nowait())
             except queue.Empty:
                 return saida
+
+    def destino(self, alvo) -> dict:
+        """
+        (01/out, pedido dele: "toda notificacao do Android da pra clicar que
+        abre algo; no PC tem que ser o mesmo") O que o toque abriria: o
+        `dumpsys activity intents` mostra o pedido guardado de cada
+        PendingIntent (o shell pode ler; disparar o PendingIntent ele nao
+        pode). {} = nao deu. Fora da thread da janela (~0,3 s).
+        """
+        if not alvo or not self._serial:
+            return {}
+        ident = re.sub(r"[^0-9a-f]", "", str(alvo[0]))
+        if not ident:
+            return {}
+        saida = self._rodar([str(self._adb()), "-s", self._serial, "shell",
+                             "dumpsys activity intents | grep -A3 "
+                             "'PendingIntentRecord{%s '" % ident], 10)
+        destino = ler_destino(saida)
+        if destino:
+            destino["tipo"] = alvo[2]
+        return destino
 
     def esta_ativa(self, chave: str) -> bool:
         with self._trava:
