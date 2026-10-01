@@ -454,6 +454,7 @@ class Central:
         self.midias: list = []            # fotos do player (ver _manter_midia)
         self.midias_versao = 0
         self.chamada = None               # Notif da chamada TOCANDO, ou None
+        self._player_fechado = None       # (pacote, quando) do x do player
 
     # -- vida -----------------------------------------------------------------
 
@@ -659,11 +660,39 @@ class Central:
         if mudou:
             self._mudou()
 
+    def fechar_player(self, pacote: str) -> None:
+        """
+        (01/out, pedido dele) O x do player, como arrastar o player no
+        celular: pausa (se toca), tira a notificacao de midia do app e some
+        do PC. Volta sozinho quando o app tocar de novo (alguem deu play).
+        """
+        m = next((x for x in self.midias if x["pacote"] == pacote), None)
+        if m is not None and m["estado"] == 3:
+            self.midia_comando(pacote, "pause")
+        with self._trava:
+            self._player_fechado = (pacote, time.monotonic())
+            chaves = [n.chave for n in self.ativas.values()
+                      if n.pacote == pacote and n.modelo == "MediaStyle"]
+        self.anotar("player: fechado (%s)" % pacote)
+        if chaves:
+            self.remover(chaves)
+        self._mudou()
+
     def player(self) -> dict | None:
         """A sessao a mostrar: a que esta tocando; senao a pausada mais
-        recente com musica. None = nada."""
+        recente com musica. None = nada. A que foi fechada no x fica de fora
+        ate tocar de novo."""
         with self._trava:
             lista = list(self.midias)
+            fechado = self._player_fechado
+        if fechado is not None:
+            pkg, quando = fechado
+            if any(m["pacote"] == pkg and m["estado"] == 3 for m in lista) \
+                    and time.monotonic() - quando > 2.5:
+                with self._trava:
+                    self._player_fechado = None      # tocou de novo: volta
+            else:
+                lista = [m for m in lista if m["pacote"] != pkg]
         for m in lista:
             if m["estado"] == 3 and (m["titulo"] or m["dur"]):
                 return m

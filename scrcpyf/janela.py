@@ -4675,6 +4675,13 @@ class Janela(tk.Tk):
         f._pady = (E.px(0), E.px(8))
         topo = tk.Frame(f, bg=E.FUNDO)
         topo.pack(side="top", fill="x", padx=E.px(10), pady=(E.px(8), 0))
+        # (01/out, pedido dele) x = fechar o player, como arrastar no celular.
+        x = tk.Label(topo, text="×", bg=E.FUNDO, fg=E.APAGADO,
+                     font=E.fonte(E.CORPO), cursor="hand2", padx=E.px(4))
+        x.pack(side="right", anchor="n")
+        x.bind("<Button-1>", lambda _e: (self._fechar_player(), "break")[1])
+        x.bind("<Enter>", lambda _e: x.configure(fg=E.ERRO))
+        x.bind("<Leave>", lambda _e: x.configure(fg=E.APAGADO))
         textos = tk.Frame(topo, bg=E.FUNDO)
         textos.pack(side="left", fill="x", expand=True, padx=(E.px(10), 0))
         titulo = tk.Label(textos, text="", bg=E.FUNDO, fg=E.TEXTO,
@@ -4711,6 +4718,11 @@ class Janela(tk.Tk):
         barra.bind("<B1-Motion>", lambda e: self._arrastar_player(e))
         barra.bind("<ButtonRelease-1>", lambda e: self._soltar_player(e))
         return pl
+
+    def _fechar_player(self) -> None:
+        m = (self._ui.get("player") or {}).get("sessao")
+        if m:
+            self.programa.notif.fechar_player(m["pacote"])
 
     def _comando_player(self, acao: str) -> None:
         pl = self._ui.get("player") or {}
