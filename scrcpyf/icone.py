@@ -74,10 +74,12 @@ def desenhar(estado: str = "parado"):
 
     # "+par" = celular pareado: a borda do aparelho fica verde (pedido dele,
     # 23/set/2026); sem celular, cinza. O de dentro segue o modo.
-    estado, _, marca = estado.partition("+")
+    # (01/out) "+notif" = ha notificacao do celular: bolinha laranja no
+    # canto de cima (numero em 16 px nao se le).
+    estado, *marcas = estado.split("+")
     ativo = estado in ("jogo", "audio", "extensao")
     cor = tema.canais(tema.ACENTO if ativo else tema.TEXTO_APAGADO)
-    borda = tema.canais(VERDE) if marca == "par" else cor
+    borda = tema.canais(VERDE) if "par" in marcas else cor
     traco = 4
 
     # O corpo do celular. Deslocado para a esquerda no modo audio, para caber
@@ -104,5 +106,9 @@ def desenhar(estado: str = "parado"):
         for raio, largura in ((12, 3), (22, 3)):
             caixa = (corpo[2] - raio, 32 - raio, corpo[2] + raio, 32 + raio)
             lapis.arc(caixa, start=-50, end=50, fill=cor, width=largura)
+
+    if "notif" in marcas:
+        lapis.ellipse((LADO - 24, 0, LADO - 2, 22),
+                      fill=tema.canais(tema.ACENTO), outline=(0, 0, 0, 0))
 
     return imagem

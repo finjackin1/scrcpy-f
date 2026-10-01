@@ -92,7 +92,9 @@ a = Analysis(
     # android\LEIA-ME.txt). Vai para _internal\android.
     # (r154) E o que religa o painel da tela (scrcpyf-tela.jar).
     datas=[(_os.path.join(RAIZ, "android", "scrcpyf-icones.jar"), "android"),
-           (_os.path.join(RAIZ, "android", "scrcpyf-tela.jar"), "android")],
+           (_os.path.join(RAIZ, "android", "scrcpyf-tela.jar"), "android"),
+           # (01/out/2026) O que remove notificacoes do celular.
+           (_os.path.join(RAIZ, "android", "scrcpyf-notif.jar"), "android")],
     hiddenimports=ocultos,
     hookspath=[],
     hooksconfig={},

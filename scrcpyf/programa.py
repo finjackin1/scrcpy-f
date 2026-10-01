@@ -302,6 +302,13 @@ class Programa:
         self.trocando: set[str] = set()
         self._trocar_em: dict[str, float] = {}
         self._troca_senha: dict[str, object] = {}
+        # (01/out) As notificacoes do celular (`notificacoes.py`): sobe com o
+        # celular lido (`_conferir_o_celular`), para no desligar_tudo.
+        from . import notificacoes
+        self.notif = notificacoes.Central(
+            lambda: self.config.adb_exe, self.config, self.anotar,
+            lambda: self.pedidos.put(("notif",)), self.pasta_do_celular,
+            self._pode_avisar_notif)
         # (r191) As threads que falam com o adb sobem SO AGORA, com o
         # objeto inteiro montado (antes subiam no meio do __init__ e o
         # vigia da conexao podia ler `adb_pausado`/`_sair` antes de
@@ -887,6 +894,24 @@ class Programa:
         sessao = self.sessoes.get(nome)
         pid = getattr(sessao, "pid", 0) if sessao is not None else 0
         return janela_scrcpy.achar(pid) if pid else None
+
+    def _pode_avisar_notif(self, app: str) -> bool:
+        """(01/out) Sem aviso se o app ja esta aberto numa janela do PC e na
+        frente (ele ja esta vendo). Chamado da thread das notificacoes."""
+        from . import janela_scrcpy
+        if not self.ativo(APP + app):
+            return True
+        hwnd = self._janela_da_sessao(APP + app)
+        return not hwnd or janela_scrcpy.frente() != hwnd
+
+    def abrir_pela_notificacao(self, app: str) -> None:
+        """(01/out) Clique numa notificacao: o app numa janela do PC (aberto
+        -> vem para a frente)."""
+        nome = (self.config.apps.get("nomes") or {}).get(app) or \
+            next((a[0] for a in (getattr(self, "apps_do_celular", None) or [])
+                  if a[1] == app), app)
+        self.anotar("notificacao: abrir %s" % app)
+        self.abrir_ou_trazer(app, nome)
 
     def trazer_app(self, pacote: str) -> bool:
         """A janela do app vem para a frente (o icone dele na lista)."""
@@ -2796,8 +2821,13 @@ class Programa:
         return "parado" + self._marca_pareado()
 
     def _marca_pareado(self) -> str:
-        """ "+par" com um celular lido (o icone ganha a borda verde)."""
-        return "+par" if (self.celular or {}).get("id") else ""
+        """ "+par" com um celular lido (o icone ganha a borda verde); (01/out)
+        "+notif" com notificacao do celular a ver (bolinha laranja)."""
+        marca = "+par" if (self.celular or {}).get("id") else ""
+        notif = getattr(self, "notif", None)
+        if notif is not None and notif.contagem():
+            marca += "+notif"
+        return marca
 
     # -- acoes ---------------------------------------------------------------
 
@@ -3547,6 +3577,11 @@ class Programa:
     def _conferir_o_celular(self) -> None:
         """Com alguma sessao no ar, a bateria e relida de minuto em minuto."""
         self._vigiar_bateria((self.celular or {}).get("serial", ""))
+        # (01/out) As notificacoes seguem o celular em uso (lido: com id, a
+        # pasta do historico ja existe).
+        cel = self.celular or {}
+        self.notif.garantir(cel.get("serial", "") if cel.get("id") and
+                            self.config.instalacao_ok else "")
         if not self.sessoes:
             return
         if time.monotonic() - getattr(self, "_celular_lido_em", 0.0) < 60.0:
@@ -4190,6 +4225,7 @@ class Programa:
                 log.exception("desligar tudo: %s", nome)
 
         passo("status", self.desligar_status)
+        passo("notificacoes", lambda: self.notif.parar(esperar=True))
         for nome in list(self.sessoes):
             passo(nome, lambda n=nome: self.desligar(n, esperar=True))
         passo("sono", self._parar_vigia_sono)        # solta a tela do celular
@@ -4343,6 +4379,8 @@ class Programa:
             self._avisar_mudanca()
         elif acao == "dispositivos":
             self._dispositivos(pedido[1])
+        elif acao == "notif":
+            self._avisar_mudanca()          # (01/out) contador, bolinha, aba
         elif acao == "sem_resposta":
             # (r163) Listado pelo adb mas mudo: para o programa, saiu.
             if (self.celular or {}).get("serial") == pedido[1]:

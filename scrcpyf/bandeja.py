@@ -151,9 +151,10 @@ class Bandeja:
                 return
             self._estado = estado
             self._icone.icon = icone.desenhar(estado)
-            base, _, marca = estado.partition("+")
+            base, *marcas = estado.split("+")
             self._icone.title = DICA.get(base, TITULO) + (
-                " · celular conectado" if marca == "par" else "")
+                " · celular conectado" if "par" in marcas else "") + (
+                " · notificações" if "notif" in marcas else "")
         except Exception:
             pass
 

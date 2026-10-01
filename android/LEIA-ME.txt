@@ -22,6 +22,14 @@ app_process / scrcpyf.Tela vigia): ele mesmo le o botao no logcat, acorda o
 celular e alterna o painel, e escreve "botao <acesa|apagada> ..." com os
 tempos. Aceita "on"/"off" na entrada ("ok <modo> <telas>" ou "erro ...").
 Sem "vigia" so obedece on/off; com "on"/"off" como argumento faz uma vez.
+Notif.java / scrcpyf-notif.jar (01/out/2026): REMOVE notificacoes do
+celular (o mesmo que arrastar na barra: IStatusBarService.onNotificationClear)
+-- app_process / scrcpyf.Notif remover <chave> [<chave> ...]; a chave e a do
+"cmd notification list". Ler as notificacoes o PC faz pelo "cmd notification"
+(a API de listar pede uma permissao que o shell nao tem). Monta igual ao
+Tela.java (abaixo); o JDK portatil e o dex-tools baixados para a pasta
+temporaria da sessao bastam.
+
 Como remontar: javac --release 8 -d cls Tela.java (pasta scrcpyf/) e
 java -jar dx-30.0.2.jar --dex --min-sdk-version=26 --output=classes.dex cls
 (o dx vem no dex-tools 2.4 do dex2jar, no GitHub); zipar o classes.dex.

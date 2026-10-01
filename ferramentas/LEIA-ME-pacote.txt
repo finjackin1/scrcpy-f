@@ -60,7 +60,10 @@ Na lista da esquerda:
              dele na area de trabalho. App duplicado (Dual Messenger)
              aparece como "Nome (2)", na janela dele.
   STATUS     bateria, temperatura e o que pesa no celular.
-  OPCOES     notificacoes, abrir com o Windows, pagina inicial, pasta do
+  NOTIFICACOES  as do celular, como no celular (o x remove la tambem),
+             aviso no canto da tela (clique abre o app numa janela),
+             historico de 24 horas e, em ajustes, quais apps avisam no PC.
+  OPCOES     avisos do programa, abrir com o Windows, pagina inicial, pasta do
              scrcpy, atualizacoes, atalhos de teclado e qualidade.
 
 Clicar no X esconde a janela (o programa continua ao lado do relogio).

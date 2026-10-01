@@ -66,6 +66,9 @@ OPCOES_DE_FABRICA = {
     # (r161) O aviso "atalho criado" (pedido dele, 25/set/2026: opcao para
     # desligar). So vale com as notificacoes ligadas.
     "aviso_atalho": False,               # (r171) de fabrica desligado
+    # (01/out) Notificacoes do celular no PC: a chave GERAL (o padrao de
+    # todos os apps; cada app pode ser excecao em apps["notif"]).
+    "notif_pc": True,
 }
 
 # Os dois arquivos soltos da versao de scripts. Existem so para a migracao da
@@ -570,6 +573,31 @@ class Config:
             self.apps.pop(campo, None)
         else:
             self.apps[campo] = valor
+        return self.gravar()
+
+    # NOTIFICACOES DO CELULAR NO PC (01/out/2026, pedido dele): a geral e o
+    # padrao; apps["notif"] = {app: True/False} sao as excecoes. Virar a
+    # geral e "ativar todos / desativar todos": as excecoes saem.
+
+    def notif_do_app(self, app: str) -> bool:
+        excecoes = self.apps.get("notif") or {}
+        if app in excecoes:
+            return bool(excecoes[app])
+        return self.opcao("notif_pc")
+
+    def definir_notif_app(self, app: str, ligado: bool) -> bool:
+        excecoes = self.apps.setdefault("notif", {})
+        if bool(ligado) == self.opcao("notif_pc"):
+            excecoes.pop(app, None)          # igual a geral: nao e excecao
+        else:
+            excecoes[app] = bool(ligado)
+        if not excecoes:
+            self.apps.pop("notif", None)
+        return self.gravar()
+
+    def definir_notif_geral(self, ligado: bool) -> bool:
+        self.opcoes["notif_pc"] = bool(ligado)
+        self.apps.pop("notif", None)
         return self.gravar()
 
     def lembrar_ip(self, ip: str) -> None:

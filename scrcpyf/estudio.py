@@ -53,7 +53,7 @@ CORES_DA_MARCA = ["#FF5A1F", "#E9E6DF", "#3D8BFF", "#2FD07A", "#FF3D8B",
 # - Tela pequena: a escala baixa ate a janela caber na area util (menos a
 #   barra de tarefas), com folga.
 ESCALA_PEDIDA = 1.3
-LARGURA_BASE, ALTURA_BASE = 680, 34 + 1 + 286     # a janela em 100%
+LARGURA_BASE, ALTURA_BASE = 680, 34 + 1 + 316     # a janela em 100%
 
 
 def _dpi_do_sistema() -> float:
@@ -168,7 +168,7 @@ MEDIDA = 11
 # -- medidas --------------------------------------------------------------------
 LARGURA = px(680)
 ALTURA_BARRA = px(34)
-ALTURA_CORPO = px(286)
+ALTURA_CORPO = px(316)       # (01/out) +30: o item NOTIFICACOES
 LARGURA_LISTA = px(150)
 LARGURA_GRANDE = px(960)
 ALTURA_GRANDE_CORPO = px(520)

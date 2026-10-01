@@ -63,7 +63,7 @@ VERMELHO_SAINDO = "#FF1A1A"   # bem vermelho (pedido dele)
 HALO = ((E.px(2), 0.20), (E.px(1), 0.42))
 SALTO_PX = E.px(10)
 # A janela crescendo para o mapa grande (e voltando).
-ORDEM_DOS_ITENS = ["jogo", "extensao", "apps", "celular", "parear",
+ORDEM_DOS_ITENS = ["jogo", "extensao", "apps", "celular", "notif", "parear",
                    "opcoes"]
 # APPS: quantos icones de apps abertos
 # cabem ao lado de OPCOES e as cores da inicial de quem ainda nao tem
@@ -94,6 +94,10 @@ ABAS = {
     "apps": [("lista", "apps"), ("aparencia", "ajustes"),
              ("personalizados", "personalizados")],
     "celular": [("status", "celular")],
+    # (01/out) As notificacoes do celular: como no celular, o historico de
+    # 24 h (como o do Samsung) e as chaves.
+    "notif": [("lista", "notificações"), ("ajustes", "ajustes"),
+              ("historico", "histórico")],
     # (r193) Duas abas pela frequencia de uso (pedido dele, 30/set/2026: o
     # parear estava "desconexo"): o dia a dia e o celular novo.
     "parear": [("conexao", "conexão"), ("adicionar", "adicionar")],
@@ -172,7 +176,7 @@ class Janela(tk.Tk):
         if not self._config.instalacao_ok:
             self._item = "opcoes"
         self._aba = {"jogo": "basico", "extensao": "basico", "apps": "lista",
-                     "celular": "status",
+                     "celular": "status", "notif": "lista",
                      "parear": "conexao", "opcoes": "geral"}
         self._metodo = "cabo"           # (r193) ADICIONAR: "cabo" | "codigo"
         self._prontos_vistos = None     # (r193) outros celulares ao vivo
@@ -382,6 +386,11 @@ class Janela(tk.Tk):
         it = E.Item(dentro, "status", lambda: self._escolher_item("celular"))
         it.pack(side="top", fill="x", pady=(E.px(0), E.px(5)))
         self._itens["celular"] = it
+        # (01/out) O quadradinho da direita conta as notificacoes.
+        it = E.Item(dentro, "notificações",
+                    lambda: self._escolher_item("notif"))
+        it.pack(side="top", fill="x", pady=(E.px(0), E.px(5)))
+        self._itens["notif"] = it
         it = E.Item(dentro, "parear", lambda: self._escolher_item("parear"),
                     marca="conexao")
         it.pack(side="top", fill="x", pady=(E.px(6), E.px(0)))
@@ -2135,6 +2144,12 @@ class Janela(tk.Tk):
                   # (r159) I2 da v1.0: atalho com o nome e o icone do app.
                   ("criar atalho na área de trabalho",
                    lambda: self._criar_atalho_desktop(pacote, nome))]
+        if pacote != DEX:
+            # (01/out) Atalho para a chave do app em NOTIFICACOES > ajustes.
+            ligada = self._config.notif_do_app(pacote)
+            opcoes.append(("desligar notificações no pc" if ligada else
+                           "ligar notificações no pc",
+                           lambda: self._virar_notif_app(pacote, not ligada)))
         for texto, acao in opcoes:
             item = tk.Label(corpo, text=texto, bg=E.FUNDO_FUNDO, fg=E.TEXTO,
                             font=E.fonte(E.PEQUENA), anchor="w",
@@ -2665,7 +2680,8 @@ class Janela(tk.Tk):
         if alvo is None:
             return None
         for chave in ("rolagem_apps", "rolagem_atalhos", "rolagem_escolha",
-                      "rolagem_editor", "rolagem_pers", "rolagem_geral"):
+                      "rolagem_editor", "rolagem_pers", "rolagem_geral",
+                      "rolagem_notif"):
             rol = self._ui.get(chave)
             if rol is not None and rol.canvas.winfo_exists() and \
                     str(alvo).startswith(str(rol.canvas)):
@@ -4144,6 +4160,398 @@ class Janela(tk.Tk):
         self._repintar()
 
     # ==========================================================================
+    # NOTIFICACOES (01/out/2026, pedido dele)
+    # ==========================================================================
+    # As do celular, como no celular (agrupadas por app, x remove la tambem),
+    # o historico de 24 h (o Android nega o dele ao shell: e o que o programa
+    # viu) e as chaves (a geral e o padrao; cada app, a excecao). O estado
+    # vem de `programa.notif` (notificacoes.Central); a lista so e refeita
+    # quando a "versao" dele muda.
+
+    NOTIF_TEXTO_MAX = 180
+    HIST_MAX = 150
+
+    def _nome_notif(self, app: str) -> str:
+        from . import notificacoes
+        pacote, _, usuario = app.partition("@")
+        for fonte in (self._apps, getattr(self.programa, "apps_do_celular",
+                                          None)):
+            for nome, p, _s in (fonte or []):
+                if p == app:
+                    return nome
+        nome = (self._config.apps.get("nomes") or {}).get(pacote) or \
+            notificacoes.nome_de_sistema(pacote) or pacote.split(".")[-1]
+        return nome + (" (%s)" % usuario if usuario else "")
+
+    def _app_abre(self, app: str) -> bool:
+        """Da para abrir em janela (esta na lista de apps do celular)?"""
+        lista = self._apps or getattr(self.programa, "apps_do_celular",
+                                      None) or []
+        return any(p == app for _n, p, _s in lista)
+
+    def _quando_notif(self, ms) -> str:
+        import datetime
+        try:
+            t = float(ms or 0) / 1000.0
+        except (TypeError, ValueError):
+            return ""
+        if t <= 0:
+            return ""
+        passou = time.time() - t
+        if passou < 60:
+            return "agora"
+        if passou < 3600:
+            return "%d min" % (passou // 60)
+        d = datetime.datetime.fromtimestamp(t)
+        if d.date() == datetime.date.today():
+            return d.strftime("%H:%M")
+        return d.strftime("%d/%m %H:%M")
+
+    def _lista_notif(self, pai, chave_ui: str = "rolagem_notif") -> _Rolagem:
+        caixa = tk.Frame(pai, bg=E.FUNDO)
+        caixa.pack(side="top", fill="both", expand=True)
+        rol = _Rolagem(caixa)
+        self._ui[chave_ui] = rol
+        return rol
+
+    def _tela_notif_lista(self, area) -> None:
+        f = self._uma(area)
+        topo = tk.Frame(f, bg=E.FUNDO)
+        topo.pack(side="top", fill="x", pady=(E.px(0), E.px(8)))
+        E.Rotulo(topo, "no celular agora").pack(side="left")
+        lim = self._link(topo, "limpar tudo", self._limpar_notif)
+        lim.pack(side="right")
+        self._ui["notif_limpar"] = lim
+        self._lista_notif(f)
+        self._notif_pintada = None
+        self._pintar_notif()
+
+    def _tela_notif_historico(self, area) -> None:
+        f = self._uma(area)
+        topo = tk.Frame(f, bg=E.FUNDO)
+        topo.pack(side="top", fill="x", pady=(E.px(0), E.px(8)))
+        E.Rotulo(topo, "últimas 24 horas").pack(side="left")
+        self._link(topo, "limpar histórico", self._limpar_hist).pack(
+            side="right")
+        self._lista_notif(f)
+        self._notif_pintada = None
+        self._pintar_notif()
+
+    def _tela_notif_ajustes(self, area) -> None:
+        esq, dir_ = self._duas(area)
+        E.Rotulo(esq, "avisos no pc").pack(side="top", fill="x",
+                                          pady=(E.px(0), E.px(2)))
+        self._ui["notif_geral"] = self._chave(
+            esq, "todos os apps", self._config.opcao("notif_pc"),
+            self._virar_notif_geral, borda=False,
+            explicacao="virar esta chave liga ou desliga todos.")
+        E.Texto(esq, "ligada: todos avisam, menos os que você desligar ao "
+                     "lado. desligada: nenhum avisa, menos os que você ligar."
+                     "\n\napp desligado não avisa nem aparece em "
+                     "notificações; o histórico guarda todos. nada disso "
+                     "muda o celular. no botão direito de um app (em apps) "
+                     "também dá para ligar ou desligar.",
+                cor=E.APAGADO, largura=E.px(230)).pack(
+            side="top", fill="x", pady=(E.px(10), E.px(0)))
+        E.Rotulo(dir_, "por app").pack(side="top", fill="x",
+                                      pady=(E.px(0), E.px(6)))
+        busca = self._caixa(dir_, getattr(self, "_busca_notif", ""),
+                            ao_mudar=self._buscou_notif, ipady=2)
+        busca.master.pack(side="top", fill="x", pady=(E.px(0), E.px(6)))
+        busca.bind("<KeyRelease>", lambda _e: self._buscou_notif())
+        self._ui["busca_notif"] = busca
+        self._lista_notif(dir_)
+        self._notif_pintada = None
+        self._pintar_notif()
+        self.programa.notif.reler_bloqueados()
+        if self._apps is None and not self._apps_carregando:
+            self._carregar_apps()
+
+    def _buscou_notif(self) -> None:
+        b = self._ui.get("busca_notif")
+        self._busca_notif = b.get() if b is not None else ""
+        self._notif_pintada = None
+        self._pintar_notif()
+
+    def _pintar_notif(self) -> None:
+        aba = self._aba.get("notif")
+        rol = self._ui.get("rolagem_notif")
+        if rol is None or not rol.canvas.winfo_exists():
+            return
+        try:
+            if aba == "lista":
+                self._pintar_notif_lista(rol)
+            elif aba == "historico":
+                self._pintar_notif_hist(rol)
+            elif aba == "ajustes":
+                self._pintar_notif_ajustes(rol)
+        except tk.TclError:
+            pass
+
+    def _sem_celular_notif(self, rol) -> bool:
+        if (self.programa.celular or {}).get("serial"):
+            return False
+        E.Texto(rol.dentro, "nenhum celular conectado.", cor=E.APAGADO).pack(
+            side="top", fill="x")
+        return True
+
+    def _pintar_notif_lista(self, rol) -> None:
+        c = self.programa.notif
+        lista = c.visiveis()
+        cel = bool((self.programa.celular or {}).get("serial"))
+        chave = ("lista", c.versao, cel, tuple(n.chave for n in lista),
+                 self._icones_versao, int(time.time() // 60))
+        if chave == self._notif_pintada:
+            return
+        self._notif_pintada = chave
+        rol.limpar(manter=True)
+        lim = self._ui.get("notif_limpar")
+        if lim is not None:
+            tem = any(n.limpavel for n in lista)
+            lim.configure(fg=E.TEXTO_2 if tem else E.LINHA_FORTE,
+                          cursor="hand2" if tem else "arrow")
+        if self._sem_celular_notif(rol):
+            return
+        d = rol.dentro
+        if not lista:
+            ocultas = sum(1 for n in c.ativas.values()
+                          if not c.ligada(n.app) and not n.resumo)
+            E.Texto(d, "nenhuma notificação." + (
+                "\n%d de apps desligados no pc (veja em ajustes)." % ocultas
+                if ocultas else ""), cor=E.APAGADO, largura=E.px(440)).pack(
+                side="top", fill="x")
+            return
+        grupos: dict = {}
+        for n in lista:
+            grupos.setdefault(n.app, []).append(n)
+        for app, ns in grupos.items():
+            self._grupo_notif(d, app, ns)
+
+    def _grupo_notif(self, d, app: str, ns: list) -> None:
+        nome = self._nome_notif(app)
+        cab = tk.Frame(d, bg=E.FUNDO)
+        cab.pack(side="top", fill="x", pady=(E.px(4), E.px(3)))
+        self._icone_app(cab, app, nome, E.px(16)).pack(side="left")
+        tk.Label(cab, text=("%s  ·  %d" % (nome, len(ns))).upper()
+                 if len(ns) > 1 else nome.upper(), bg=E.FUNDO, fg=E.TEXTO_2,
+                 font=E.fonte(E.ROTULO), anchor="w").pack(
+            side="left", fill="x", expand=True, padx=(E.px(6), E.px(0)))
+        limpaveis = [n.chave for n in ns if n.limpavel]
+        if len(limpaveis) > 1:
+            self._link(cab, "limpar", lambda k=limpaveis: self._remover_notif(
+                k)).pack(side="right")
+        abre = self._app_abre(app)
+        largura = max(E.px(200), (self._ui["rolagem_notif"].canvas.winfo_width()
+                                  or E.px(560)) - E.px(40))
+        for n in ns:
+            card = tk.Frame(d, bg=E.FUNDO, highlightthickness=1,
+                            highlightbackground=E.LINHA,
+                            cursor="hand2" if abre else "arrow")
+            card.pack(side="top", fill="x", pady=(E.px(0), E.px(4)))
+            l1 = tk.Frame(card, bg=E.FUNDO)
+            l1.pack(side="top", fill="x", padx=E.px(8), pady=(E.px(5), E.px(0)))
+            pecas = [card, l1]
+            if n.limpavel:
+                x = tk.Label(l1, text="×", bg=E.FUNDO, fg=E.APAGADO,
+                             font=E.fonte(E.CORPO), cursor="hand2",
+                             padx=E.px(4))
+                x.pack(side="right")
+                x.bind("<Button-1>", lambda _e, k=n.chave: (
+                    self._remover_notif([k]), "break")[1])
+                x.bind("<Enter>", lambda _e, w=x: w.configure(fg=E.ERRO))
+                x.bind("<Leave>", lambda _e, w=x: w.configure(fg=E.APAGADO))
+            hora = tk.Label(l1, text=self._quando_notif(n.quando), bg=E.FUNDO,
+                            fg=E.APAGADO, font=E.fonte(E.ROTULO))
+            hora.pack(side="right", padx=(E.px(6), E.px(2)))
+            titulo = tk.Label(l1, text=_encurtar(n.titulo or nome, 60),
+                              bg=E.FUNDO, fg=E.TEXTO,
+                              font=E.fonte(E.PEQUENA, "bold"), anchor="w")
+            titulo.pack(side="left", fill="x", expand=True)
+            pecas += [hora, titulo]
+            corpo = n.texto or n.subtexto
+            if corpo:
+                if len(corpo) > self.NOTIF_TEXTO_MAX:
+                    corpo = corpo[:self.NOTIF_TEXTO_MAX - 1] + "…"
+                t = tk.Label(card, text=corpo, bg=E.FUNDO, fg=E.TEXTO_2,
+                             font=E.fonte(E.ROTULO), anchor="w",
+                             justify="left", wraplength=largura)
+                t.pack(side="top", fill="x", padx=E.px(8))
+                pecas.append(t)
+            tk.Frame(card, bg=E.FUNDO, height=E.px(5)).pack(side="top")
+            if abre:
+                for w in pecas:
+                    w.bind("<Button-1>", lambda _e, a=app: self._abrir_notif(a))
+                    w.bind("<Enter>", lambda _e, w=card: w.configure(
+                        highlightbackground=E.ACENTO), add="+")
+                    w.bind("<Leave>", lambda _e, w=card: w.configure(
+                        highlightbackground=E.LINHA), add="+")
+
+    def _pintar_notif_hist(self, rol) -> None:
+        c = self.programa.notif
+        hist = c.historico_visivel()[:self.HIST_MAX]
+        chave = ("hist", c.versao, len(hist), self._icones_versao,
+                 int(time.time() // 60))
+        if chave == self._notif_pintada:
+            return
+        self._notif_pintada = chave
+        rol.limpar(manter=True)
+        d = rol.dentro
+        if not hist:
+            E.Texto(d, "nada nas últimas 24 horas. o histórico guarda o que "
+                       "chega enquanto o scrcpy-f está conectado ao celular.",
+                    cor=E.APAGADO, largura=E.px(440)).pack(side="top",
+                                                          fill="x")
+            return
+        largura = max(E.px(200), (rol.canvas.winfo_width() or E.px(560))
+                      - E.px(40))
+        for h in hist:
+            app = str(h.get("app") or "")
+            nome = self._nome_notif(app)
+            linha = tk.Frame(d, bg=E.FUNDO)
+            linha.pack(side="top", fill="x", pady=(E.px(0), E.px(6)))
+            self._icone_app(linha, app, nome, E.px(16)).pack(
+                side="left", anchor="n", pady=(E.px(2), E.px(0)))
+            col = tk.Frame(linha, bg=E.FUNDO)
+            col.pack(side="left", fill="x", expand=True, padx=(E.px(8), 0))
+            tk.Label(col, text="%s  ·  %s" % (
+                nome.upper(), self._quando_notif(h.get("quando"))),
+                bg=E.FUNDO, fg=E.APAGADO, font=E.fonte(E.ROTULO),
+                anchor="w").pack(side="top", fill="x")
+            if h.get("titulo"):
+                tk.Label(col, text=_encurtar(str(h["titulo"]), 70),
+                         bg=E.FUNDO, fg=E.TEXTO, font=E.fonte(E.PEQUENA),
+                         anchor="w").pack(side="top", fill="x")
+            texto = str(h.get("texto") or "")
+            if texto:
+                if len(texto) > self.NOTIF_TEXTO_MAX:
+                    texto = texto[:self.NOTIF_TEXTO_MAX - 1] + "…"
+                tk.Label(col, text=texto, bg=E.FUNDO, fg=E.TEXTO_2,
+                         font=E.fonte(E.ROTULO), anchor="w", justify="left",
+                         wraplength=largura).pack(side="top", fill="x")
+
+    def _apps_para_notif(self) -> list:
+        """[(app, nome)] da lista de apps do celular + quem ja mandou
+        notificacao, por nome. Sem o DeX."""
+        vistos = {}
+        for nome, p, _s in (self._apps or getattr(self.programa,
+                                                  "apps_do_celular", None)
+                            or []):
+            if p != DEX:
+                vistos[p] = nome
+        c = self.programa.notif
+        for n in list(c.ativas.values()):
+            vistos.setdefault(n.app, self._nome_notif(n.app))
+        for h in c.historico[-200:]:
+            app = str(h.get("app") or "")
+            if app:
+                vistos.setdefault(app, self._nome_notif(app))
+        return sorted(vistos.items(), key=lambda x: x[1].lower())
+
+    def _pintar_notif_ajustes(self, rol) -> None:
+        c = self.programa.notif
+        apps = self._apps_para_notif()
+        termo = getattr(self, "_busca_notif", "").strip().lower()
+        if termo:
+            apps = [(a, n) for a, n in apps
+                    if termo in n.lower() or termo in a.lower()]
+        excecoes = dict(self._config.apps.get("notif") or {})
+        chave = ("ajustes", tuple(a for a, _n in apps), repr(excecoes),
+                 self._config.opcao("notif_pc"), frozenset(c.bloqueados),
+                 self._icones_versao)
+        if chave == self._notif_pintada:
+            return
+        self._notif_pintada = chave
+        rol.limpar(manter=True)
+        d = rol.dentro
+        if not apps:
+            E.Texto(d, "nenhum app encontrado." if termo else
+                    "a lista de apps chega quando o celular conectar.",
+                    cor=E.APAGADO).pack(side="top", fill="x")
+            return
+
+        def fazer(item):
+            app, nome = item
+            linha = tk.Frame(d, bg=E.FUNDO)
+            linha.pack(side="top", fill="x")
+            self._icone_app(linha, app, nome, E.px(16)).pack(
+                side="left", padx=(E.px(0), E.px(6)))
+            textos = tk.Frame(linha, bg=E.FUNDO)
+            textos.pack(side="left", fill="x", expand=True, pady=E.px(3))
+            tk.Label(textos, text=_encurtar(nome, 26).upper(), bg=E.FUNDO,
+                     fg=E.TEXTO, font=E.fonte(E.ROTULO), anchor="w").pack(
+                side="top", fill="x")
+            if app in c.bloqueados:
+                tk.Label(textos, text="desligada no celular",
+                         bg=E.FUNDO, fg=E.ALERTA, font=E.fonte(E.ROTULO - 1),
+                         anchor="w").pack(side="top", fill="x")
+            E.Chave(linha, c.ligada(app),
+                    lambda v, a=app: self._virar_notif_app(a, v)).pack(
+                side="right")
+
+        self._em_lotes(d, apps, fazer, primeiro=14, lote=16)
+
+    def _virar_notif_geral(self, ligado: bool) -> None:
+        self._conferir_gravacao(self._config.definir_notif_geral(ligado))
+        self.programa.anotar("notificacoes no pc: geral %s (excecoes zeradas)"
+                             % ("ligada" if ligado else "desligada"))
+        self._notif_pintada = None
+        self._pintar_notif()
+        self.programa._avisar_mudanca()
+
+    def _virar_notif_app(self, app: str, ligado: bool) -> None:
+        self._conferir_gravacao(self._config.definir_notif_app(app, ligado))
+        self.programa.anotar("notificacoes no pc: %s %s" % (
+            app, "ligada" if ligado else "desligada"))
+        self._notif_pintada = None
+        if self._item == "notif":
+            self._pintar_notif()
+        self.programa._avisar_mudanca()
+
+    def _remover_notif(self, chaves) -> None:
+        self.programa.notif.remover(
+            chaves, avisar=lambda t: self._da_outra_thread.put(
+                lambda: self.programa.anotar("notificacoes: %s" % t)))
+
+    def _limpar_notif(self) -> None:
+        chaves = [n.chave for n in self.programa.notif.visiveis()
+                  if n.limpavel]
+        if chaves:
+            self._remover_notif(chaves)
+
+    def _limpar_hist(self) -> None:
+        self.programa.notif.limpar_historico()
+        self._notif_pintada = None
+        self._pintar_notif()
+
+    def _abrir_notif(self, app: str) -> None:
+        if self._app_abre(app):
+            self.programa.abrir_pela_notificacao(app)
+
+    def _giro_notif(self) -> None:
+        """Os avisos no canto da tela (`aviso_notif`), na thread do Tk."""
+        novas = self.programa.notif.proximos_avisos()
+        if not novas:
+            return
+        if getattr(self, "_avisos", None) is None:
+            from . import aviso_notif
+            self._avisos = aviso_notif.Avisos(self, self._icone_app,
+                                              self._clicou_aviso,
+                                              self.programa.anotar)
+        for n in novas[-3:]:
+            self._avisos.mostrar(n.app, self._nome_notif(n.app), n.titulo,
+                                 n.texto or n.subtexto,
+                                 self._quando_notif(n.quando))
+
+    def _clicou_aviso(self, app: str) -> None:
+        """Clique no aviso: o app numa janela do PC; app que nao abre em
+        janela (do sistema) -> esta janela, nas notificacoes."""
+        if self._app_abre(app):
+            self.programa.abrir_pela_notificacao(app)
+        else:
+            self.abrir_em("notif", "lista")
+            self.mostrar()
+
+    # ==========================================================================
     # OPCOES
     # ==========================================================================
 
@@ -4184,7 +4592,10 @@ class Janela(tk.Tk):
         self._escolha_inicial(esq)
         tk.Frame(esq, bg=E.LINHA, height=1).pack(side="top", fill="x",
                                                  pady=(E.px(8), E.px(0)))
-        self._chave(esq, "notificações", self._config.opcao("notificacoes"),
+        # (01/out) "notificacoes" virou "avisos do programa": as notificacoes
+        # do CELULAR tem item proprio (NOTIFICACOES).
+        self._chave(esq, "avisos do programa",
+                    self._config.opcao("notificacoes"),
                     # (r171) Remonta: "ao criar atalho" trava/destrava NA
                     # HORA (antes so ao sair e voltar da aba).
                     lambda v: (self._virar_opcao("notificacoes", v),
@@ -4660,6 +5071,7 @@ class Janela(tk.Tk):
 
     NOMES_DAS_PAGINAS = (("jogo", "espelhar"), ("extensao", "extensão"),
                          ("apps", "apps"), ("celular", "status"),
+                         ("notif", "notificações"),
                          ("parear", "parear"), ("opcoes", "opções"))
 
     def _escolha_inicial(self, pai) -> None:
@@ -5270,6 +5682,11 @@ class Janela(tk.Tk):
                 elif chave == "apps":
                     it.definir(selecionado=(chave == self._item),
                                vivo=bool(p.apps_abertos()))
+                elif chave == "notif":
+                    n = p.notif.contagem()
+                    it.definir(selecionado=(chave == self._item),
+                               tecla=(str(n) if n < 100 else "99+")
+                               if n else "")
                 else:
                     it.definir(selecionado=(chave == self._item))
         except tk.TclError:
@@ -5278,6 +5695,8 @@ class Janela(tk.Tk):
         self._conferir_cache()
         if self._item == "apps":
             self._pintar_lista_apps()
+        if self._item == "notif":
+            self._pintar_notif()
 
         if self._item in ("jogo", "extensao") and not self._grande:
             estado = self._ui.get("estado")
@@ -5354,6 +5773,7 @@ class Janela(tk.Tk):
         self._parte_do_giro(self.programa.passo)
         self._parte_do_giro(self._giro_chamado)
         self._parte_do_giro(self._giro_atalhos)
+        self._parte_do_giro(self._giro_notif)
         # (r120) Medidor do status ligado pela previa (ao conectar) com a
         # janela escondida: so desligava quando algo repintava a janela,
         # e o celular seguia sendo lido sem ninguem olhando.
@@ -5752,6 +6172,8 @@ class Janela(tk.Tk):
     def _encerrar(self) -> None:
         try:
             self.withdraw()
+            if getattr(self, "_avisos", None) is not None:
+                self._avisos.fechar_todos()
         except Exception:
             pass
         self._parar_trabalho.set()
