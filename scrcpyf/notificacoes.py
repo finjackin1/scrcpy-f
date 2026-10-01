@@ -55,11 +55,16 @@ JUNTAR_RAJADA_S = 0.15
 # cada resposta). O `M=` deixa a marca na linha de comando (pkill).
 SERVIDOR = (
     "M=%s; "
-    "g(){ cmd notification get \"$1\" | sed -n -e '/^  uid=/p' "
+    # `</dev/null`: o `cmd` do Android repassa a entrada ao servico -- dentro
+    # do lote ("G") ele nao pode ler as chaves seguintes.
+    "g(){ cmd notification get \"$1\" </dev/null | sed -n -e '/^  uid=/p' "
     "-e '/^  flags=/p' -e '/^    when=/p' -e '/^    extras={/,/^    }/p'; }; "
     "while read c a; do case $c in "
-    "l) cmd notification list;; "
+    "l) cmd notification list </dev/null;; "
     "g) echo \"@k $a\"; g \"$a\";; "
+    # G: varias chaves numa ida so (uma por linha, "." no fim)
+    "G) while read k; do if [ \"$k\" = . ]; then break; fi; "
+    "echo \"@k $k\"; g \"$k\"; done;; "
     "b) dumpsys notification | grep 'AppSettings:' | grep 'importance=NONE';; "
     "esac; echo @fim; done" % MARCA)
 EVENTOS = ("logcat -b events -v epoch -T 1 -s notification_enqueue:I "
@@ -187,6 +192,22 @@ def ler_detalhe(chave: str, texto: str) -> Notif | None:
                  flags)
 
 
+def _separar_por_chave(linhas: list[str]):
+    """A resposta do "G" ("@k <chave>" e as linhas dela, repetido) ->
+    [(chave, texto)]."""
+    saida, chave, junto = [], None, []
+    for linha in linhas:
+        if linha.startswith("@k "):
+            if chave is not None:
+                saida.append((chave, "\n".join(junto)))
+            chave, junto = linha[3:].strip(), []
+        elif chave is not None:
+            junto.append(linha)
+    if chave is not None:
+        saida.append((chave, "\n".join(junto)))
+    return saida
+
+
 def ler_evento(linha: str) -> tuple[str, str]:
     """
     Uma linha do logcat de eventos -> (tipo, chave). tipo = "chegou" (com a
@@ -257,6 +278,12 @@ class Central:
         self._tentou_em = 0.0
         self._jar_pronto = ""             # serial onde o jar ja foi posto
         self.sdk = 0                      # o Android do celular em uso
+        self._fila = None                 # linhas da conversa (thread leitora)
+        self._subindo = False             # _subir em andamento (nao reinicia)
+        self._salvar_timer = None         # gravacao do historico agrupada
+        self._a_remover: list = []        # chaves esperando o jar (em lote)
+        self._removendo = False
+        self._avisar_falha = None
 
     # -- vida -----------------------------------------------------------------
 
@@ -269,7 +296,8 @@ class Central:
                 for n in self.ativas.values():
                     n.sdk = sdk
             self._mudou()
-        if serial == self._serial and (not serial or self._vivo()):
+        if serial == self._serial and (not serial or self._vivo()
+                                       or self._subindo):
             return
         if serial == self._serial and time.monotonic() - self._tentou_em < 5:
             return                       # caiu: espera um pouco e tenta de novo
@@ -279,9 +307,15 @@ class Central:
         self._serial = serial
         self._tentou_em = time.monotonic()
         self._geracao += 1
+        self._subindo = True
         self._carregar_historico()
         threading.Thread(target=self._subir, args=(serial, self._geracao),
                          daemon=True, name="notif").start()
+
+    def todas(self) -> list:
+        """As ativas, copiadas sob a trava (a janela le de outra thread)."""
+        with self._trava:
+            return list(self.ativas.values())
 
     def _vivo(self) -> bool:
         return bool(self._procs) and all(p.poll() is None for p in self._procs)
@@ -293,8 +327,10 @@ class Central:
         no encerramento (`esperar=True`) espera, antes do kill-server."""
         serial, self._serial = self._serial, ""
         self._geracao += 1
+        self._subindo = False
         procs, self._procs = self._procs, []
         self._servidor = None
+        self._salvar_agora()             # o que estava esperando para gravar
         for p in procs:
             try:
                 p.terminate()
@@ -339,13 +375,19 @@ class Central:
                                   creationflags=SEM_JANELA)
         except Exception as erro:
             self.anotar("notificacoes: nao subiu (%s)" % erro)
+            self._subindo = False
             return
         if geracao != self._geracao:
             for p in (srv, ev):
                 p.terminate()
             return
+        fila: "queue.Queue[str | None]" = queue.Queue()
+        threading.Thread(target=self._ler_servidor, args=(srv, fila),
+                         daemon=True, name="notif-servidor").start()
+        self._fila = fila
         self._servidor = srv
         self._procs = [srv, ev]
+        self._subindo = False
         self.anotar("notificacoes: no ar (%s)" % serial)
         threading.Thread(target=self._ler_eventos, args=(ev, geracao),
                          daemon=True, name="notif-eventos").start()
@@ -353,28 +395,58 @@ class Central:
 
     # -- conversa -------------------------------------------------------------
 
-    def _pedir(self, pedido: str, espera: float = 8.0) -> list[str]:
-        """Manda um pedido a conversa de pe e devolve as linhas da resposta."""
+    @staticmethod
+    def _ler_servidor(srv, fila) -> None:
+        """Thread leitora: cada linha da conversa vai para a fila; None =
+        a conversa acabou. Assim o `_pedir` espera COM PRAZO (antes um
+        readline sem fim prendia tudo se o celular parasse de responder)."""
+        try:
+            for bruta in srv.stdout:
+                fila.put(bruta.decode("utf-8", errors="replace").rstrip("\r\n"))
+        except Exception:
+            pass
+        fila.put(None)
+
+    def _pedir(self, pedido: str, espera: float = 8.0,
+               entrada=()) -> list[str] | None:
+        """
+        Manda um pedido a conversa de pe (mais as linhas de `entrada`) e
+        devolve as linhas da resposta. None = falhou: conversa caida, ou o
+        celular nao respondeu no prazo -- ai a conversa e derrubada e o
+        `garantir` sobe outra (melhor que ficar preso).
+        """
         with self._srv_trava:
-            srv = self._servidor
-            if srv is None or srv.poll() is not None:
-                return []
+            srv, fila = self._servidor, self._fila
+            if srv is None or fila is None or srv.poll() is not None:
+                return None
             try:
-                srv.stdin.write((pedido + "\n").encode("utf-8"))
+                texto = "\n".join([pedido] + list(entrada)) + "\n"
+                srv.stdin.write(texto.encode("utf-8"))
                 srv.stdin.flush()
             except Exception:
-                return []
+                return None
             linhas = []
             fim = time.monotonic() + espera
-            while time.monotonic() < fim:
-                bruta = srv.stdout.readline()
-                if not bruta:
-                    break
-                linha = bruta.decode("utf-8", errors="replace").rstrip("\r\n")
+            while True:
+                resto = fim - time.monotonic()
+                if resto <= 0:
+                    self.anotar("notificacoes: o celular nao respondeu a '%s' "
+                                "em %.0f s; refazendo a conversa"
+                                % (pedido, espera))
+                    try:
+                        srv.terminate()
+                    except Exception:
+                        pass
+                    return None
+                try:
+                    linha = fila.get(timeout=resto)
+                except queue.Empty:
+                    continue
+                if linha is None:
+                    return None
                 if linha == "@fim":
                     return linhas
                 linhas.append(linha)
-            return linhas
 
     def _ler_eventos(self, proc, geracao: int) -> None:
         try:
@@ -419,24 +491,27 @@ class Central:
                 break
 
     def _reler(self, completa: bool) -> None:
-        chaves = [x.strip() for x in self._pedir("l") if x.strip().count("|") >= 4]
-        srv = self._servidor
-        if srv is None or srv.poll() is not None:
+        resposta = self._pedir("l")
+        if resposta is None:
             return                       # caiu: lista vazia nao e "saiu tudo"
+        chaves = [x.strip() for x in resposta if x.strip().count("|") >= 4]
         with self._trava:
             antigas = dict(self.ativas)
             pedidas, self._pedidas = self._pedidas, set()
         detalhar = [c for c in chaves
                     if completa or c not in antigas or c in pedidas]
         novas = {c: antigas[c] for c in chaves if c in antigas}
-        for chave in detalhar:
-            linhas = self._pedir("g " + chave)
-            n = ler_detalhe(chave, "\n".join(linhas[1:] if linhas and
-                                             linhas[0].startswith("@k ")
-                                             else linhas))
-            if n is not None:
-                n.sdk = self.sdk
-                novas[chave] = n
+        if detalhar:
+            # Todas numa ida so ("G"): antes uma ida e volta por chave.
+            linhas = self._pedir("G", espera=6 + 0.3 * len(detalhar),
+                                 entrada=detalhar + ["."])
+            if linhas is None:
+                return
+            for chave, texto in _separar_por_chave(linhas):
+                n = ler_detalhe(chave, texto)
+                if n is not None:
+                    n.sdk = self.sdk
+                    novas[chave] = n
         chegaram = [n for c, n in novas.items()
                     if c not in antigas or antigas[c].conteudo() != n.conteudo()]
         sairam = [n for c, n in antigas.items() if c not in novas]
@@ -459,14 +534,17 @@ class Central:
         # nao vai para o log nem para o historico.
         importa = [n for n in chegaram if not n.fixa] + sairam
         if importa or primeira:
-            self._salvar_historico()
+            self._salvar_logo()
             self.anotar("notificacoes: %d no celular (+%d -%d)%s"
                         % (len(novas), len(chegaram), len(sairam),
                            " [1a leitura]" if primeira else ""))
         self._mudou()
 
     def _ler_bloqueados(self) -> None:
-        bloq = ler_bloqueados("\n".join(self._pedir("b", espera=15)))
+        resposta = self._pedir("b", espera=15)
+        if resposta is None:
+            return                       # sem resposta: fica a lista anterior
+        bloq = ler_bloqueados("\n".join(resposta))
         with self._trava:
             mudou = bloq != self.bloqueados
             self.bloqueados = bloq
@@ -539,40 +617,64 @@ class Central:
             return
         with self._trava:
             tiradas = [self.ativas.pop(c) for c in chaves if c in self.ativas]
+            # (01/out) EM LOTE: cliques seguidos no x juntam numa ida so do
+            # jar (antes cada clique subia um app_process de ~1 s).
+            self._a_remover.extend(c for c in chaves
+                                   if c not in self._a_remover)
+            self._avisar_falha = avisar
+            iniciar = not self._removendo
+            self._removendo = True
         if tiradas:
-            self._marcar_e_salvar(tiradas)
+            agora = int(time.time() * 1000)
+            for n in tiradas:
+                self._marcar_saida(n, agora)
+            self._salvar_logo()
             self._mudou()
+        if iniciar:
+            threading.Thread(target=self._remover_em_lote, args=(serial,),
+                             daemon=True, name="notif-remover").start()
 
-        def trabalho():
-            adb = str(self._adb())
-            if self._jar_pronto != serial:
-                from pathlib import Path
-                jar = Path(caminhos.pasta_interna()) / "android" / \
-                    "scrcpyf-notif.jar"
-                self._rodar([adb, "-s", serial, "push", str(jar),
-                             JAR_NO_CELULAR], 20)
-                self._jar_pronto = serial
-            # Todas de uma vez: subir o jar custa ~1 s.
-            args = " ".join("'%s'" % c.replace("'", "'\\''") for c in chaves)
-            saida = self._rodar(
-                [adb, "-s", serial, "shell",
-                 "CLASSPATH=%s app_process / scrcpyf.Notif remover %s"
-                 % (JAR_NO_CELULAR, args)], 15 + 3 * len(chaves)).strip()
-            falhas = [x for x in saida.split("\n")
-                      if not x.startswith("removido")]
-            apps = sorted({c.split("|")[1] for c in chaves
-                           if c.count("|") >= 4})
-            self.anotar("notificacoes: remover %d (%s) -> %s"
-                        % (len(chaves), ", ".join(apps)[:200],
-                           (" / ".join(falhas) or "ok")[:300]
-                           if saida else "(sem resposta)"))
-            if falhas or not saida:
-                self._sujo.set()             # volta pra lista se nao saiu
-                if avisar is not None:
-                    avisar("não consegui remover do celular")
+    def _remover_em_lote(self, serial: str) -> None:
+        while True:
+            time.sleep(0.15)                 # junta os cliques seguidos
+            with self._trava:
+                chaves, self._a_remover = self._a_remover, []
+                avisar = self._avisar_falha
+                if not chaves or serial != self._serial:
+                    self._removendo = False
+                    self._a_remover = []
+                    return
+            try:
+                self._rodar_jar_remover(serial, chaves, avisar)
+            except Exception:
+                log.exception("notificacoes: remover")
 
-        threading.Thread(target=trabalho, daemon=True,
-                         name="notif-remover").start()
+    def _rodar_jar_remover(self, serial: str, chaves: list, avisar) -> None:
+        adb = str(self._adb())
+        if self._jar_pronto != serial:
+            from pathlib import Path
+            jar = Path(caminhos.pasta_interna()) / "android" / \
+                "scrcpyf-notif.jar"
+            self._rodar([adb, "-s", serial, "push", str(jar),
+                         JAR_NO_CELULAR], 20)
+            self._jar_pronto = serial
+        args = " ".join("'%s'" % c.replace("'", "'\\''") for c in chaves)
+        saida = self._rodar(
+            [adb, "-s", serial, "shell",
+             "CLASSPATH=%s app_process / scrcpyf.Notif remover %s"
+             % (JAR_NO_CELULAR, args)], 15 + 3 * len(chaves)).strip()
+        falhas = [x for x in saida.split("\n")
+                  if not x.startswith("removido")]
+        apps = sorted({c.split("|")[1] for c in chaves if c.count("|") >= 4})
+        self.anotar("notificacoes: remover %d (%s) -> %s"
+                    % (len(chaves), ", ".join(apps)[:200],
+                       (" / ".join(falhas) or "ok")[:300]
+                       if saida else "(sem resposta)"))
+        if falhas or not saida:
+            self._jar_pronto = ""            # pode ter sumido do celular
+            self._sujo.set()                 # volta pra lista se nao saiu
+            if avisar is not None:
+                avisar("não consegui remover do celular")
 
     # -- historico ------------------------------------------------------------
 
@@ -615,11 +717,25 @@ class Central:
                     d["saiu"] = agora
                     break
 
-    def _marcar_e_salvar(self, lista) -> None:
-        agora = int(time.time() * 1000)
-        for n in lista:
-            self._marcar_saida(n, agora)
-        self._salvar_historico()
+    SALVAR_DEPOIS_S = 2.0
+
+    def _salvar_logo(self) -> None:
+        """Grava o historico daqui a pouco, juntando as mudancas de uma
+        rajada (antes gravava a cada notificacao)."""
+        with self._trava:
+            if self._salvar_timer is not None:
+                return
+            t = threading.Timer(self.SALVAR_DEPOIS_S, self._salvar_agora)
+            t.daemon = True
+            self._salvar_timer = t
+        t.start()
+
+    def _salvar_agora(self) -> None:
+        with self._trava:
+            t, self._salvar_timer = self._salvar_timer, None
+        if t is not None:
+            t.cancel()
+            self._salvar_historico()
 
     def _salvar_historico(self) -> None:
         arq = self._arquivo_historico()
@@ -637,6 +753,7 @@ class Central:
     def limpar_historico(self) -> None:
         with self._trava:
             self.historico = []
+        self._salvar_agora()
         self._salvar_historico()
         self._mudou()
 

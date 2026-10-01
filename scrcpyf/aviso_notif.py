@@ -27,6 +27,8 @@ log = logging.getLogger(__name__)
 
 DURA_S = 6.0
 MAX_NA_TELA = 3
+ENTRA_MS = 140          # esmaecer ao aparecer / sumir (animacoes do Windows)
+SAI_MS = 120
 TEXTO_MAX = 160
 NO_WINDOWS = sys.platform == "win32"
 QUNS_ACCEPTS_NOTIFICATIONS = 5
@@ -83,7 +85,7 @@ class Avisos:
             self.anotar("aviso: o windows esta em nao perturbe/tela cheia")
             return
         while len(self._na_tela) >= MAX_NA_TELA:
-            self._fechar(self._na_tela[0])
+            self._fechar(self._na_tela[0], animar=False)
         j = tk.Toplevel(self.raiz)
         j.withdraw()
         j.overrideredirect(True)
@@ -138,10 +140,37 @@ class Avisos:
         j.geometry("%dx%d" % (self.largura, j.winfo_reqheight()))
         self._na_tela.append(j)
         self._arrumar()
+        animar = moldura.animacoes_ligadas()
+        if animar:
+            j.attributes("-alpha", 0.0)
         j.deiconify()
         _sem_foco(j)
         j.lift()
+        if animar:
+            self._esmaecer(j, 0.0, 1.0, ENTRA_MS)
         self._agendar(j)
+
+    def _esmaecer(self, j, de: float, ate: float, ms: int, fim=None) -> None:
+        """Opacidade de `de` a `ate` pelo RELOGIO (como as animacoes da
+        janela): um quadro atrasado nao estica a animacao."""
+        import time
+        inicio = time.monotonic()
+
+        def passo():
+            try:
+                if not j.winfo_exists():
+                    return
+                t = min(1.0, (time.monotonic() - inicio) * 1000.0 / ms)
+                t = 1 - (1 - t) ** 2            # desacelera no fim
+                j.attributes("-alpha", de + (ate - de) * t)
+                if t < 1.0:
+                    j.after(10, passo)
+                elif fim is not None:
+                    fim()
+            except tk.TclError:
+                if fim is not None:
+                    fim()
+        passo()
 
     def _agendar(self, j) -> None:
         anterior = getattr(j, "_sumir_id", None)
@@ -172,15 +201,27 @@ class Avisos:
             except tk.TclError:
                 pass
 
-    def _fechar(self, j) -> None:
-        if j in self._na_tela:
-            self._na_tela.remove(j)
-        try:
-            j.destroy()
-        except tk.TclError:
-            pass
-        self._arrumar()
+    def _fechar(self, j, animar: bool = True) -> None:
+        if j not in self._na_tela:
+            return
+        self._na_tela.remove(j)
+
+        def sumir():
+            try:
+                j.destroy()
+            except tk.TclError:
+                pass
+            self._arrumar()
+
+        if animar and moldura.animacoes_ligadas():
+            try:
+                self._esmaecer(j, float(j.attributes("-alpha")), 0.0,
+                               SAI_MS, sumir)
+                return
+            except tk.TclError:
+                pass
+        sumir()
 
     def fechar_todos(self) -> None:
         for j in list(self._na_tela):
-            self._fechar(j)
+            self._fechar(j, animar=False)

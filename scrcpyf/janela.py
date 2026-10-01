@@ -118,7 +118,8 @@ AJUSTES_SEM_REABRIR = ("ao_fechar",)
 AO_FECHAR = [("fechar", "fechar o app"), ("deixar", "deixar aberto")]
 # Telas que ficam guardadas (escondidas) ao sair e voltam prontas (r115/116).
 TELAS_GUARDADAS = ("_tela_apps_lista", "_tela_opcoes_qualidade",
-                   "_tela_opcoes_atalhos", "_tela_notif_ajustes")
+                   "_tela_opcoes_atalhos", "_tela_notif_ajustes",
+                   "_tela_notif_lista", "_tela_notif_historico")
 
 PRECISA = {"som": (30, "11"), "pc_cel": (33, "13"), "apps": (29, "10")}
 
@@ -752,7 +753,7 @@ class Janela(tk.Tk):
                     # Largura de agora antes de conferir (a grade depende).
                     palco.update_idletasks()
                     self._pintar_lista_apps()  # so o que mudou enquanto fora
-                elif tela == "_tela_notif_ajustes":
+                elif tela.startswith("_tela_notif_"):
                     # (01/out) A busca nao fica entre visitas (como as outras
                     # caixas); o resto so muda no lugar.
                     b = self._ui.get("busca_notif")
@@ -760,6 +761,7 @@ class Janela(tk.Tk):
                         b.delete(0, "end")
                     self._busca_notif = ""
                     self._pintar_notif()
+                    self._horas_notif()
             else:
                 getattr(self, tela)(palco)
             if tela == "_tela_notif_ajustes":
@@ -4234,7 +4236,7 @@ class Janela(tk.Tk):
         lim.pack(side="right")
         self._ui["notif_limpar"] = lim
         self._lista_notif(f)
-        self._notif_pintada = None
+        self._ui["notif_pintada"] = None
         self._pintar_notif()
 
     def _tela_notif_historico(self, area) -> None:
@@ -4245,7 +4247,7 @@ class Janela(tk.Tk):
         self._link(topo, "limpar histórico", self._limpar_hist).pack(
             side="right")
         self._lista_notif(f)
-        self._notif_pintada = None
+        self._ui["notif_pintada"] = None
         self._pintar_notif()
 
     def _tela_notif_ajustes(self, area) -> None:
@@ -4272,7 +4274,7 @@ class Janela(tk.Tk):
         busca.bind("<KeyRelease>", lambda _e: self._buscou_notif())
         self._ui["busca_notif"] = busca
         self._lista_notif(dir_)
-        self._notif_pintada = None
+        self._ui["notif_pintada"] = None
         self._pintar_notif()
         if self._apps is None and not self._apps_carregando:
             self._carregar_apps()
@@ -4297,155 +4299,249 @@ class Janela(tk.Tk):
         except tk.TclError:
             pass
 
-    def _sem_celular_notif(self, rol) -> bool:
-        if (self.programa.celular or {}).get("serial"):
-            return False
-        E.Texto(rol.dentro, "nenhum celular conectado.", cor=E.APAGADO).pack(
-            side="top", fill="x")
-        return True
+    # LISTAS SEM PISCAR (01/out, "otimizacao geral da aba"): notificacoes e
+    # historico nao sao mais refeitos a cada mudanca do celular (a
+    # "carregando" do sistema muda a cada ~40 s) nem a cada minuto (a hora).
+    # Cada cartao/linha nasce uma vez e fica guardado pela chave; numa
+    # mudanca so entra o novo, sai o que saiu e a ordem e acertada com
+    # pack/pack_forget. A hora ("2 min") troca no lugar (`_horas_notif`).
+
+    def _largura_texto_notif(self) -> int:
+        """Quebra de linha do texto: a largura da area menos margens, fixa
+        (a do canvas ainda e 1 px quando a tela esta montando)."""
+        return (E.LARGURA - E.LARGURA_LISTA - 2 * E.PADDING - E.px(10)
+                - E.px(24))
+
+    def _repor_notif(self, d, querido: list) -> None:
+        """Deixa em `d` exatamente os widgets de `querido`, nessa ordem."""
+        if d.pack_slaves() == querido:
+            return
+        for w in d.pack_slaves():
+            w.pack_forget()
+        for w in querido:
+            w.pack(side="top", fill="x", pady=getattr(w, "_pady", 0))
+
+    def _msg_notif(self, d, texto: str):
+        msg = self._ui.get("notif_msg")
+        if msg is None or not msg.winfo_exists():
+            msg = E.Texto(d, "", cor=E.APAGADO, largura=E.px(480))
+            msg._pady = (E.px(0), E.px(6))
+            self._ui["notif_msg"] = msg
+        if msg.cget("text") != texto:
+            msg.configure(text=texto)
+        return msg
+
+    def _horas_notif(self) -> None:
+        """Atualiza "agora"/"2 min"/"08:12" no lugar (sem remontar)."""
+        for lbl, quando, prefixo in self._ui.get("notif_horas", ()):
+            try:
+                texto = prefixo + self._quando_notif(quando)
+                if lbl.cget("text") != texto:
+                    lbl.configure(text=texto)
+            except tk.TclError:
+                pass
 
     def _pintar_notif_lista(self, rol) -> None:
         c = self.programa.notif
         lista = c.visiveis()
         cel = bool((self.programa.celular or {}).get("serial"))
-        chave = ("lista", c.versao, cel, tuple(n.chave for n in lista),
-                 self._icones_versao, int(time.time() // 60))
-        if chave == self._notif_pintada:
-            return
-        self._notif_pintada = chave
-        rol.limpar(manter=True)
-        # (01/out, teste dele: "limpar tudo nao funciona" -- eram todas
-        # FIXAS, que nem o "limpar tudo" do celular tira, e o link seguia com
-        # cara de clicavel.) Sem nada que se possa tirar, o link some.
-        lim = self._ui.get("notif_limpar")
         tem = any(n.limpavel for n in lista)
+        assin = (cel, tuple((n.chave, n.conteudo(), n.limpavel, n.quando)
+                            for n in lista), self._icones_versao,
+                 frozenset(self._config.apps.get("notif") or {}),
+                 self._config.opcao("notif_pc"))
+        if assin == self._ui.get("notif_pintada"):
+            return
+        self._ui["notif_pintada"] = assin
+        # (01/out, teste dele) Sem nada que se possa tirar, o link some.
+        lim = self._ui.get("notif_limpar")
         if lim is not None:
             if tem and not lim.winfo_manager():
                 lim.pack(side="right")
             elif not tem and lim.winfo_manager():
                 lim.pack_forget()
-        if self._sem_celular_notif(rol):
-            return
         d = rol.dentro
-        if not lista:
-            ocultas = sum(1 for n in c.ativas.values()
+        cartoes: dict = self._ui.setdefault("notif_cartoes", {})
+        cabecas: dict = self._ui.setdefault("notif_cabecas", {})
+        if self._ui.get("notif_ic") != self._icones_versao:
+            # Icones chegaram: as cabecas (que tem o icone) nascem de novo.
+            self._ui["notif_ic"] = self._icones_versao
+            for cab in cabecas.values():
+                cab[0].destroy()
+            cabecas.clear()
+        querido = []
+        if not cel:
+            querido.append(self._msg_notif(d, "nenhum celular conectado."))
+        elif not lista:
+            ocultas = sum(1 for n in c.todas()
                           if not c.ligada(n.app) and not n.resumo)
-            E.Texto(d, "nenhuma notificação." + (
+            querido.append(self._msg_notif(d, "nenhuma notificação." + (
                 "\n%d de apps desligados no pc (veja em ajustes)." % ocultas
-                if ocultas else ""), cor=E.APAGADO, largura=E.px(440)).pack(
-                side="top", fill="x")
-            return
-        if not tem:
-            E.Texto(d, "estas o celular não deixa dispensar: só o próprio "
-                       "app tira.",
-                    cor=E.APAGADO, largura=E.px(480)).pack(
-                side="top", fill="x", pady=(E.px(0), E.px(6)))
+                if ocultas else "")))
+        elif not tem:
+            querido.append(self._msg_notif(
+                d, "estas o celular não deixa dispensar: só o próprio "
+                   "app tira."))
         grupos: dict = {}
-        for n in lista:
+        for n in (lista if cel else []):
             grupos.setdefault(n.app, []).append(n)
+        vivos_c, vivas_cab = set(), set()
+        horas = []
         for app, ns in grupos.items():
-            self._grupo_notif(d, app, ns)
+            cab = cabecas.get(app)
+            if cab is None:
+                cab = cabecas[app] = self._cabeca_notif(d, app)
+            self._acertar_cabeca_notif(cab, app, ns)
+            vivas_cab.add(app)
+            querido.append(cab[0])
+            for n in ns:
+                assin_c = (n.conteudo(), n.limpavel)
+                cartao = cartoes.get(n.chave)
+                if cartao is not None and cartao[1] != assin_c:
+                    cartao[0].destroy()
+                    cartao = None
+                if cartao is None:
+                    cartao = cartoes[n.chave] = self._cartao_notif(d, app, n)
+                vivos_c.add(n.chave)
+                querido.append(cartao[0])
+                horas.append((cartao[2], n.quando, ""))
+        for k in [k for k in cartoes if k not in vivos_c]:
+            cartoes.pop(k)[0].destroy()
+        for a in [a for a in cabecas if a not in vivas_cab]:
+            cabecas.pop(a)[0].destroy()
+        self._ui["notif_horas"] = horas
+        self._repor_notif(d, querido)
 
-    def _grupo_notif(self, d, app: str, ns: list) -> None:
+    def _cabeca_notif(self, d, app: str):
         nome = self._nome_notif(app)
         cab = tk.Frame(d, bg=E.FUNDO)
-        cab.pack(side="top", fill="x", pady=(E.px(4), E.px(3)))
+        cab._pady = (E.px(4), E.px(3))
         self._icone_app(cab, app, nome, E.px(16)).pack(side="left")
-        tk.Label(cab, text=("%s  ·  %d" % (nome, len(ns))).upper()
-                 if len(ns) > 1 else nome.upper(), bg=E.FUNDO, fg=E.TEXTO_2,
-                 font=E.fonte(E.ROTULO), anchor="w").pack(
-            side="left", fill="x", expand=True, padx=(E.px(6), E.px(0)))
-        if sum(1 for n in ns if n.limpavel) > 1:
-            self._link(cab, "limpar", lambda a=app: self._limpar_notif(
-                a)).pack(side="right")
+        rot = tk.Label(cab, text="", bg=E.FUNDO, fg=E.TEXTO_2,
+                       font=E.fonte(E.ROTULO), anchor="w")
+        rot.pack(side="left", fill="x", expand=True, padx=(E.px(6), E.px(0)))
+        lim = self._link(cab, "limpar", lambda a=app: self._limpar_notif(a))
+        return (cab, rot, lim, nome)
+
+    def _acertar_cabeca_notif(self, cab, app: str, ns: list) -> None:
+        _f, rot, lim, nome = cab
+        texto = ("%s  ·  %d" % (nome, len(ns))).upper() if len(ns) > 1 \
+            else nome.upper()
+        if rot.cget("text") != texto:
+            rot.configure(text=texto)
+        varias = sum(1 for n in ns if n.limpavel) > 1
+        if varias and not lim.winfo_manager():
+            lim.pack(side="right")
+        elif not varias and lim.winfo_manager():
+            lim.pack_forget()
+
+    def _cartao_notif(self, d, app: str, n):
+        """Um cartao: titulo, hora, x (se der para tirar) e o texto.
+        Devolve (frame, assinatura, label da hora)."""
+        nome = self._nome_notif(app)
         abre = self._app_abre(app)
-        largura = max(E.px(200), (self._ui["rolagem_notif"].canvas.winfo_width()
-                                  or E.px(560)) - E.px(40))
-        for n in ns:
-            card = tk.Frame(d, bg=E.FUNDO, highlightthickness=1,
-                            highlightbackground=E.LINHA,
-                            cursor="hand2" if abre else "arrow")
-            card.pack(side="top", fill="x", pady=(E.px(0), E.px(4)))
-            l1 = tk.Frame(card, bg=E.FUNDO)
-            l1.pack(side="top", fill="x", padx=E.px(8), pady=(E.px(5), E.px(0)))
-            pecas = [card, l1]
-            if n.limpavel:
-                x = tk.Label(l1, text="×", bg=E.FUNDO, fg=E.APAGADO,
-                             font=E.fonte(E.CORPO), cursor="hand2",
-                             padx=E.px(4))
-                x.pack(side="right")
-                x.bind("<Button-1>", lambda _e, k=n.chave: (
-                    self._remover_notif([k]), "break")[1])
-                x.bind("<Enter>", lambda _e, w=x: w.configure(fg=E.ERRO))
-                x.bind("<Leave>", lambda _e, w=x: w.configure(fg=E.APAGADO))
-            hora = tk.Label(l1, text=self._quando_notif(n.quando), bg=E.FUNDO,
-                            fg=E.APAGADO, font=E.fonte(E.ROTULO))
-            hora.pack(side="right", padx=(E.px(6), E.px(2)))
-            titulo = tk.Label(l1, text=_encurtar(n.titulo or nome, 60),
-                              bg=E.FUNDO, fg=E.TEXTO,
-                              font=E.fonte(E.PEQUENA, "bold"), anchor="w")
-            titulo.pack(side="left", fill="x", expand=True)
-            pecas += [hora, titulo]
-            corpo = n.texto or n.subtexto
-            if corpo:
-                if len(corpo) > self.NOTIF_TEXTO_MAX:
-                    corpo = corpo[:self.NOTIF_TEXTO_MAX - 1] + "…"
-                t = tk.Label(card, text=corpo, bg=E.FUNDO, fg=E.TEXTO_2,
-                             font=E.fonte(E.ROTULO), anchor="w",
-                             justify="left", wraplength=largura)
-                t.pack(side="top", fill="x", padx=E.px(8))
-                pecas.append(t)
-            tk.Frame(card, bg=E.FUNDO, height=E.px(5)).pack(side="top")
-            if abre:
-                for w in pecas:
-                    w.bind("<Button-1>", lambda _e, a=app: self._abrir_notif(a))
-                    w.bind("<Enter>", lambda _e, w=card: w.configure(
-                        highlightbackground=E.ACENTO), add="+")
-                    w.bind("<Leave>", lambda _e, w=card: w.configure(
-                        highlightbackground=E.LINHA), add="+")
+        card = tk.Frame(d, bg=E.FUNDO, highlightthickness=1,
+                        highlightbackground=E.LINHA,
+                        cursor="hand2" if abre else "arrow")
+        card._pady = (E.px(0), E.px(4))
+        l1 = tk.Frame(card, bg=E.FUNDO)
+        l1.pack(side="top", fill="x", padx=E.px(8), pady=(E.px(5), E.px(0)))
+        pecas = [card, l1]
+        if n.limpavel:
+            x = tk.Label(l1, text="×", bg=E.FUNDO, fg=E.APAGADO,
+                         font=E.fonte(E.CORPO), cursor="hand2", padx=E.px(4))
+            x.pack(side="right")
+            x.bind("<Button-1>", lambda _e, k=n.chave: (
+                self._remover_notif([k]), "break")[1])
+            x.bind("<Enter>", lambda _e, w=x: w.configure(fg=E.ERRO))
+            x.bind("<Leave>", lambda _e, w=x: w.configure(fg=E.APAGADO))
+        hora = tk.Label(l1, text=self._quando_notif(n.quando), bg=E.FUNDO,
+                        fg=E.APAGADO, font=E.fonte(E.ROTULO))
+        hora.pack(side="right", padx=(E.px(6), E.px(2)))
+        titulo = tk.Label(l1, text=_encurtar(n.titulo or nome, 60),
+                          bg=E.FUNDO, fg=E.TEXTO,
+                          font=E.fonte(E.PEQUENA, "bold"), anchor="w")
+        titulo.pack(side="left", fill="x", expand=True)
+        pecas += [hora, titulo]
+        corpo = n.texto or n.subtexto
+        if corpo:
+            if len(corpo) > self.NOTIF_TEXTO_MAX:
+                corpo = corpo[:self.NOTIF_TEXTO_MAX - 1] + "…"
+            t = tk.Label(card, text=corpo, bg=E.FUNDO, fg=E.TEXTO_2,
+                         font=E.fonte(E.ROTULO), anchor="w", justify="left",
+                         wraplength=self._largura_texto_notif())
+            t.pack(side="top", fill="x", padx=E.px(8))
+            pecas.append(t)
+        tk.Frame(card, bg=E.FUNDO, height=E.px(5)).pack(side="top")
+        if abre:
+            for w in pecas:
+                w.bind("<Button-1>", lambda _e, a=app: self._abrir_notif(a))
+                w.bind("<Enter>", lambda _e: card.configure(
+                    highlightbackground=E.ACENTO), add="+")
+                w.bind("<Leave>", lambda _e: card.configure(
+                    highlightbackground=E.LINHA), add="+")
+        return (card, (n.conteudo(), n.limpavel), hora)
 
     def _pintar_notif_hist(self, rol) -> None:
         c = self.programa.notif
         hist = c.historico_visivel()[:self.HIST_MAX]
-        chave = ("hist", c.versao, len(hist), self._icones_versao,
-                 int(time.time() // 60))
-        if chave == self._notif_pintada:
+        ids = tuple((h.get("chave"), h.get("quando"), h.get("titulo"),
+                     h.get("texto")) for h in hist)
+        assin = (ids, self._icones_versao)
+        if assin == self._ui.get("notif_pintada"):
             return
-        self._notif_pintada = chave
-        rol.limpar(manter=True)
+        self._ui["notif_pintada"] = assin
         d = rol.dentro
+        linhas: dict = self._ui.setdefault("notif_hist", {})
+        if self._ui.get("notif_hist_ic") != self._icones_versao:
+            self._ui["notif_hist_ic"] = self._icones_versao
+            for w in linhas.values():
+                w[0].destroy()
+            linhas.clear()
+        querido, horas, vivos = [], [], set()
         if not hist:
-            E.Texto(d, "nada nas últimas 24 horas. o histórico guarda o que "
-                       "chega enquanto o scrcpy-f está conectado ao celular.",
-                    cor=E.APAGADO, largura=E.px(440)).pack(side="top",
-                                                          fill="x")
-            return
-        largura = max(E.px(200), (rol.canvas.winfo_width() or E.px(560))
-                      - E.px(40))
-        for h in hist:
-            app = str(h.get("app") or "")
-            nome = self._nome_notif(app)
-            linha = tk.Frame(d, bg=E.FUNDO)
-            linha.pack(side="top", fill="x", pady=(E.px(0), E.px(6)))
-            self._icone_app(linha, app, nome, E.px(16)).pack(
-                side="left", anchor="n", pady=(E.px(2), E.px(0)))
-            col = tk.Frame(linha, bg=E.FUNDO)
-            col.pack(side="left", fill="x", expand=True, padx=(E.px(8), 0))
-            tk.Label(col, text="%s  ·  %s" % (
-                nome.upper(), self._quando_notif(h.get("quando"))),
-                bg=E.FUNDO, fg=E.APAGADO, font=E.fonte(E.ROTULO),
-                anchor="w").pack(side="top", fill="x")
-            if h.get("titulo"):
-                tk.Label(col, text=_encurtar(str(h["titulo"]), 70),
-                         bg=E.FUNDO, fg=E.TEXTO, font=E.fonte(E.PEQUENA),
-                         anchor="w").pack(side="top", fill="x")
-            texto = str(h.get("texto") or "")
-            if texto:
-                if len(texto) > self.NOTIF_TEXTO_MAX:
-                    texto = texto[:self.NOTIF_TEXTO_MAX - 1] + "…"
-                tk.Label(col, text=texto, bg=E.FUNDO, fg=E.TEXTO_2,
-                         font=E.fonte(E.ROTULO), anchor="w", justify="left",
-                         wraplength=largura).pack(side="top", fill="x")
+            querido.append(self._msg_notif(
+                d, "nada nas últimas 24 horas. o histórico guarda o que "
+                   "chega enquanto o scrcpy-f está conectado ao celular."))
+        for ident, h in zip(ids, hist):
+            linha = linhas.get(ident)
+            if linha is None:
+                linha = linhas[ident] = self._linha_hist(d, h)
+            vivos.add(ident)
+            querido.append(linha[0])
+            horas.append((linha[1], h.get("quando"), linha[2]))
+        for k in [k for k in linhas if k not in vivos]:
+            linhas.pop(k)[0].destroy()
+        self._ui["notif_horas"] = horas
+        self._repor_notif(d, querido)
+
+    def _linha_hist(self, d, h):
+        app = str(h.get("app") or "")
+        nome = self._nome_notif(app)
+        linha = tk.Frame(d, bg=E.FUNDO)
+        linha._pady = (E.px(0), E.px(6))
+        self._icone_app(linha, app, nome, E.px(16)).pack(
+            side="left", anchor="n", pady=(E.px(2), E.px(0)))
+        col = tk.Frame(linha, bg=E.FUNDO)
+        col.pack(side="left", fill="x", expand=True, padx=(E.px(8), 0))
+        prefixo = "%s  ·  " % nome.upper()
+        topo = tk.Label(col, text=prefixo + self._quando_notif(h.get("quando")),
+                        bg=E.FUNDO, fg=E.APAGADO, font=E.fonte(E.ROTULO),
+                        anchor="w")
+        topo.pack(side="top", fill="x")
+        if h.get("titulo"):
+            tk.Label(col, text=_encurtar(str(h["titulo"]), 70), bg=E.FUNDO,
+                     fg=E.TEXTO, font=E.fonte(E.PEQUENA), anchor="w").pack(
+                side="top", fill="x")
+        texto = str(h.get("texto") or "")
+        if texto:
+            if len(texto) > self.NOTIF_TEXTO_MAX:
+                texto = texto[:self.NOTIF_TEXTO_MAX - 1] + "…"
+            tk.Label(col, text=texto, bg=E.FUNDO, fg=E.TEXTO_2,
+                     font=E.fonte(E.ROTULO), anchor="w", justify="left",
+                     wraplength=self._largura_texto_notif() - E.px(24)).pack(
+                side="top", fill="x")
+        return (linha, topo, prefixo)
 
     def _apps_para_notif(self) -> list:
         """[(app, nome)] da lista de apps do celular + quem ja mandou
@@ -4457,9 +4553,9 @@ class Janela(tk.Tk):
             if p != DEX:
                 vistos[p] = nome
         c = self.programa.notif
-        for n in list(c.ativas.values()):
+        for n in c.todas():
             vistos.setdefault(n.app, self._nome_notif(n.app))
-        for h in c.historico[-200:]:
+        for h in c.historico_visivel()[:200]:
             app = str(h.get("app") or "")
             if app:
                 vistos.setdefault(app, self._nome_notif(app))
@@ -4476,8 +4572,8 @@ class Janela(tk.Tk):
         c = self.programa.notif
         apps = self._apps_para_notif()
         chave = ("ajustes", tuple(apps), self._icones_versao)
-        if chave != self._notif_pintada:
-            self._notif_pintada = chave
+        if chave != self._ui.get("notif_pintada"):
+            self._ui["notif_pintada"] = chave
             self._acertar_linhas_notif(rol, apps)
         linhas = self._ui.get("notif_linhas") or {}
         bloq = c.bloqueados
@@ -4586,9 +4682,7 @@ class Janela(tk.Tk):
         self._conferir_gravacao(self._config.definir_notif_app(app, ligado))
         self.programa.anotar("notificacoes no pc: %s %s" % (
             app, "ligada" if ligado else "desligada"))
-        if self._aba.get("notif") != "ajustes":
-            self._notif_pintada = None      # a lista muda de verdade
-        self.programa._avisar_mudanca()
+        self.programa._avisar_mudanca()     # a lista compara as chaves
 
     def _remover_notif(self, chaves) -> None:
         self.programa.notif.remover(
@@ -4604,15 +4698,23 @@ class Janela(tk.Tk):
 
     def _limpar_hist(self) -> None:
         self.programa.notif.limpar_historico()
-        self._notif_pintada = None
+        self._ui["notif_pintada"] = None
         self._pintar_notif()
 
     def _abrir_notif(self, app: str) -> None:
         if self._app_abre(app):
             self.programa.abrir_pela_notificacao(app)
 
+    HORAS_A_CADA_S = 20.0
+
     def _giro_notif(self) -> None:
-        """Os avisos no canto da tela (`aviso_notif`), na thread do Tk."""
+        """Os avisos no canto da tela (`aviso_notif`), na thread do Tk; e a
+        hora das notificacoes a vista, de tempos em tempos, no lugar."""
+        if self._item == "notif" and self._visivel:
+            agora = time.monotonic()
+            if agora - getattr(self, "_horas_em", 0.0) >= self.HORAS_A_CADA_S:
+                self._horas_em = agora
+                self._horas_notif()
         novas = self.programa.notif.proximos_avisos()
         if not novas:
             return
