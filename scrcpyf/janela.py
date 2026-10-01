@@ -2361,6 +2361,11 @@ class Janela(tk.Tk):
             self._fotos.clear()
             self._icones_versao += 1
             self._agendar_renovar()
+            # (01/out, teste dele: "os icones aparecem e depois somem")
+            # Limpar as fotos apaga a imagem de quem ja estava na tela: a
+            # aba de notificacoes a vista redesenha os icones na hora.
+            if self._item == "notif":
+                self._pintar_notif()
         self._pintar_lista_apps()
 
     def _pintar_aviso_apps(self) -> None:
@@ -4521,9 +4526,16 @@ class Janela(tk.Tk):
             t.pack(side="top", fill="x", padx=E.px(8))
             pecas.append(t)
         tk.Frame(card, bg=E.FUNDO, height=E.px(5)).pack(side="top")
+        def menu(e, a=app, k=n.chave):
+            # (01/out, teste dele: "botao direito nao faz nada") O clique
+            # geral (bind_all no botao 3) fechava o menu logo depois de
+            # abrir: como no menu dos apps, faz o geral antes e para aqui.
+            self._clique_em_qualquer_lugar(e)
+            self._menu_notif(e, a, k)
+            return "break"
+
         for w in pecas:
-            w.bind("<Button-3>", lambda e, a=app, k=n.chave:
-                   self._menu_notif(e, a, k))
+            w.bind("<Button-3>", menu)
         if abre:
             for w in pecas:
                 w.bind("<Button-1>", lambda _e, a=app, k=n.chave:
