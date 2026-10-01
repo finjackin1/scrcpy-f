@@ -85,12 +85,14 @@ def achar_pasta_dentro(pasta):
 
 class Resultado:
     def __init__(self, ok: bool, texto: str, modelo: str = "",
-                 endereco: str = "", achados: list | None = None) -> None:
+                 endereco: str = "", achados: list | None = None,
+                 serial: str = "") -> None:
         self.ok = ok
         self.texto = texto          # o que a tela mostra
         self.modelo = modelo
         self.endereco = endereco    # IP na rede (vai para o config)
         self.achados = achados      # so do `procurar`: a lista para escolher
+        self.serial = serial        # quando ja se sabe QUAL serial usar
 
 
 def _modelo(adb, serial: str) -> str:
@@ -177,6 +179,16 @@ def conectar_pelo_cabo(adb, avisar, parar: threading.Event) -> Resultado:
     if parar.is_set():
         return Resultado(False, "Cancelado.")
 
+    # (limpeza 01/out) PREFERINDO O CABO, o sem fio e um extra: se ele nao
+    # ficar pronto, o celular entra em uso pelo cabo mesmo (antes falhava
+    # sem Wi-Fi -- em aberto desde o r194).
+    def so_pelo_cabo(motivo: str) -> Resultado | None:
+        if celular.PREFERENCIA != "cabo":
+            return None
+        return Resultado(True, "Pronto: %s em uso pelo cabo (o sem fio não "
+                         "ficou pronto: %s)." % (modelo, motivo),
+                         modelo=modelo, serial=serial)
+
     avisar("Procurando o endereço do celular na rede...")
     ip = ""
     for _vez in range(5):
@@ -185,7 +197,7 @@ def conectar_pelo_cabo(adb, avisar, parar: threading.Event) -> Resultado:
             break
         time.sleep(0.8)
     if not ip:
-        return Resultado(
+        return so_pelo_cabo("sem Wi-Fi") or Resultado(
             False, "O %s não está no Wi-Fi (não achei o endereço dele na "
             "rede). Ligue o Wi-Fi do celular, na mesma rede do PC, e tente "
             "de novo." % modelo, modelo=modelo)
@@ -199,7 +211,7 @@ def conectar_pelo_cabo(adb, avisar, parar: threading.Event) -> Resultado:
                 True, "Pronto: %s conectado sem fio (%s). Pode tirar o cabo."
                 % (modelo, ip), modelo=modelo, endereco=ip)
         time.sleep(1.0)
-    return Resultado(
+    return so_pelo_cabo("não respondeu em %s" % ip) or Resultado(
         False, "Achei o %s pelo cabo, mas a conexão sem fio não respondeu "
         "em %s. Confira se ele está na MESMA rede Wi-Fi do PC (não em rede "
         "de convidados, sem VPN) e tente de novo." % (modelo, ip),

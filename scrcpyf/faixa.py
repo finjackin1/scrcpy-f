@@ -45,7 +45,7 @@ import sys
 import threading
 import time
 
-from . import monitores as mon, tema
+from . import monitores as mon
 
 log = logging.getLogger(__name__)
 

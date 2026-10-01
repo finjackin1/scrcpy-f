@@ -41,8 +41,14 @@ icones/
 # Arquivos velhos esperando ele apagar (organizacao de 23/set/2026)
 _para_apagar/
 
+# Ferramentas do Claude Code nesta maquina (caminhos dele; nao sao do programa)
+.claude/
+CLAUDE.md
+iniciar-claude.bat
+
 # Documento interno (escrito por Claude para Claude), zips e sobras
 docs/CONTEXTO.md
+docs/historico/
 *.zip
 *.bak
 .lixeira-fmcp/

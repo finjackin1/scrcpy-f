@@ -413,7 +413,7 @@ class Programa:
         """
         if not self.config.instalacao_ok:
             return [], "a pasta do scrcpy não foi encontrada (opções > geral)."
-        alvo = celular.achar(self.config.adb_exe, self.config.ip_reserva)
+        alvo = self._achar_celular()
         if not alvo:
             return [], "celular não encontrado. conecte em parear e tente de novo."
         # UTF-8 aqui, e nao o `celular._rodar`: nome de app tem acento, e
@@ -846,8 +846,8 @@ class Programa:
         def fazer():
             alvo = ""
             if self.config.instalacao_ok:
-                alvo = celular.achar_rapido(self.config.adb_exe,
-                                            self.config.ip_reserva)
+                alvo = self._em_uso_pronto() or celular.achar_rapido(
+                    self.config.adb_exe, self.config.ip_reserva)
             if not alvo:
                 self.anotar("atalho: celular nao conectado%s"
                             % (" -- fechando" if sair_se_falhar else ""))
@@ -1803,7 +1803,7 @@ class Programa:
             return
         # (r149) Aqui fica o `achar` de verdade: roda 1x ao entrar na aba, e
         # com um serial velho o medidor cairia e religaria sem parar.
-        alvo = celular.achar(self.config.adb_exe, self.config.ip_reserva)
+        alvo = self._achar_celular()
         if not alvo:
             self.status_atual = {"erro": "celular não encontrado"}
             return
@@ -2322,7 +2322,7 @@ class Programa:
         if not jar.exists():
             self.anotar("icones: falta o %s" % jar)
             return 0
-        alvo = celular.achar(self.config.adb_exe, self.config.ip_reserva)
+        alvo = self._achar_celular()
         if not alvo:
             return 0
         adb = str(self.config.adb_exe)
@@ -2395,8 +2395,7 @@ class Programa:
         subiu.
         """
         try:
-            alvo = serial or celular.achar(self.config.adb_exe,
-                                           self.config.ip_reserva)
+            alvo = serial or self._achar_celular()
             if not alvo:
                 if troca:
                     return None
@@ -2690,6 +2689,23 @@ class Programa:
         return serial or celular.achar(self.config.adb_exe,
                                        self.config.ip_reserva)
 
+    def _em_uso_pronto(self) -> str:
+        """(limpeza 01/out) O serial do celular em uso, se o adb o lista como
+        pronto agora (a vigia atualiza `_prontos` a cada 1,5 s); senao vazio."""
+        serial = (self.celular or {}).get("serial", "")
+        prontos = getattr(self, "_prontos", None) or set()
+        return serial if serial in prontos else ""
+
+    def _achar_celular(self) -> str:
+        """
+        O celular de toda partida: o EM USO, se esta pronto; senao a procura
+        completa. Antes cada partida chamava `celular.achar`, que escolhe pela
+        preferencia de conexao e nao pelo celular em uso -- com DOIS celulares
+        ligados um modo podia subir no outro (limite anotado no r193).
+        """
+        return self._em_uso_pronto() or celular.achar(
+            self.config.adb_exe, self.config.ip_reserva)
+
     def _scrcpy_aceita(self, opcao: str) -> bool:
         """
         (r141) O scrcpy instalado conhece `opcao`? Olha o `--help` UMA vez
@@ -2798,7 +2814,7 @@ class Programa:
     def _partida(self, nome: str) -> None:
         """Roda fora do laco: acha o celular e sobe o scrcpy."""
         try:
-            alvo = celular.achar(self.config.adb_exe, self.config.ip_reserva)
+            alvo = self._achar_celular()
             if not alvo:
                 self.pedidos.put(("falhou", nome, TEXTO_SEM_CELULAR))
                 return

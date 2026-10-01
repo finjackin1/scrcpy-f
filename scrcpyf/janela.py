@@ -3221,11 +3221,14 @@ class Janela(tk.Tk):
             vistos = self._cortes_anotados = set()
         tela = "%s/%s" % (self._item, self._aba.get(self._item, ""))
         limite = self.winfo_rootx() + self.winfo_width()
+        # (limpeza 01/out) As telas guardadas ficam ATRAS da atual, mapeadas:
+        # conferi-las acusava corte com o nome da aba errada no relatorio.
+        escondidas = {str(v[0]) for v in self._guardadas.values()}
 
         def olhar(w):
             for f in w.winfo_children():
                 try:
-                    if not f.winfo_ismapped():
+                    if not f.winfo_ismapped() or str(f) in escondidas:
                         continue
                     if isinstance(f, tk.Label):
                         texto = str(f.cget("text"))
@@ -3757,7 +3760,8 @@ class Janela(tk.Tk):
             explica = ("o pc autoriza o celular pelo cabo e já deixa a "
                        "conexão sem fio pronta (os dois no mesmo wi-fi).\n\n"
                        "depois, em conexão, você escolhe se usa pelo cabo "
-                       "ou sem fio.")
+                       "ou sem fio. preferindo o cabo, funciona mesmo sem "
+                       "wi-fi.")
         else:
             explica = ("sem cabo, android 11 ou mais novo.\n\nno celular: "
                        "opções do desenvolvedor › depuração sem fio › "
@@ -4020,7 +4024,9 @@ class Janela(tk.Tk):
             # A bateria ja aparece agora, sem esperar um modo ligar.
             # Le o celular JA (icone verde, cache, status): o endereco do
             # parear nem sempre e o nome que o adb usa para ele.
-            self.programa.ler_celular_agora(getattr(self, "_usando", ""))
+            self.programa.ler_celular_agora(
+                getattr(self, "_usando", "") or
+                getattr(resultado, "serial", ""))
             self._usando = ""
             if self._item == "parear" and self._aba["parear"] == "adicionar":
                 # (r193) Adicionou: volta ao dia a dia, com ele em uso.
