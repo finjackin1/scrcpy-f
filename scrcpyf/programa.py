@@ -3581,7 +3581,8 @@ class Programa:
         # pasta do historico ja existe).
         cel = self.celular or {}
         self.notif.garantir(cel.get("serial", "") if cel.get("id") and
-                            self.config.instalacao_ok else "")
+                            self.config.instalacao_ok else "",
+                            int(cel.get("sdk") or 0))
         if not self.sessoes:
             return
         if time.monotonic() - getattr(self, "_celular_lido_em", 0.0) < 60.0:

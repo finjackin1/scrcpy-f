@@ -76,7 +76,7 @@ class Notif:
     """Uma notificacao ativa no celular."""
 
     __slots__ = ("chave", "pacote", "usuario", "quando", "titulo", "texto",
-                 "subtexto", "flags")
+                 "subtexto", "flags", "sdk")
 
     def __init__(self, chave: str, pacote: str, usuario: int, quando: int,
                  titulo: str, texto: str, subtexto: str, flags: set) -> None:
@@ -88,6 +88,7 @@ class Notif:
         self.texto = texto
         self.subtexto = subtexto
         self.flags = flags
+        self.sdk = 0                      # o Android do celular (limpavel)
 
     @property
     def app(self) -> str:
@@ -101,6 +102,16 @@ class Notif:
 
     @property
     def limpavel(self) -> bool:
+        """
+        Da para tirar, como no celular? (teste dele, 01/out: o "limpar tudo"
+        do PC dizia "fixas" e o celular as tirava.) DESDE O ANDROID 14 (API
+        34) o celular deixa dispensar as "fixas" (ONGOING/NO_CLEAR) -- so nao
+        sai o que o sistema marca NO_DISMISS (chamada, empresa...). Testado
+        no S22 (Android 16): o jar tirou a "carregando" (ONGOING_EVENT).
+        Antes do 14 vale a regra antiga.
+        """
+        if self.sdk >= 34:
+            return "NO_DISMISS" not in self.flags
         return not (self.flags & {"ONGOING_EVENT", "NO_CLEAR"})
 
     @property
@@ -245,10 +256,19 @@ class Central:
         self._pronto = False              # 1a leitura feita (antes nao avisa)
         self._tentou_em = 0.0
         self._jar_pronto = ""             # serial onde o jar ja foi posto
+        self.sdk = 0                      # o Android do celular em uso
 
     # -- vida -----------------------------------------------------------------
 
-    def garantir(self, serial: str) -> None:
+    def garantir(self, serial: str, sdk: int = 0) -> None:
+        if sdk and sdk != self.sdk:
+            # A versao do Android chegou (ou mudou de celular): vale ja para
+            # as que estao na lista (`Notif.limpavel` depende dela).
+            self.sdk = sdk
+            with self._trava:
+                for n in self.ativas.values():
+                    n.sdk = sdk
+            self._mudou()
         if serial == self._serial and (not serial or self._vivo()):
             return
         if serial == self._serial and time.monotonic() - self._tentou_em < 5:
@@ -415,6 +435,7 @@ class Central:
                                              linhas[0].startswith("@k ")
                                              else linhas))
             if n is not None:
+                n.sdk = self.sdk
                 novas[chave] = n
         chegaram = [n for c, n in novas.items()
                     if c not in antigas or antigas[c].conteudo() != n.conteudo()]

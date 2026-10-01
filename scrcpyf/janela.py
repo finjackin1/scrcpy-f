@@ -4327,8 +4327,8 @@ class Janela(tk.Tk):
                 side="top", fill="x")
             return
         if not tem:
-            E.Texto(d, "estas são fixas (música, alarme, carregando...): só "
-                       "o próprio app tira, como no celular.",
+            E.Texto(d, "estas o celular não deixa dispensar: só o próprio "
+                       "app tira.",
                     cor=E.APAGADO, largura=E.px(480)).pack(
                 side="top", fill="x", pady=(E.px(0), E.px(6)))
         grupos: dict = {}
