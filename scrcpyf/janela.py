@@ -687,6 +687,8 @@ class Janela(tk.Tk):
         tela pulando a cada clique.
         """
         self._cancelar_deslize()
+        self._dica_cancelar()           # (01/out) o quadro de uso nao fica
+        self._dica_esconder()
         self._travar_itens()
         self._acertar_abas()
         # SEM PISCAR: a tela nova e montada POR CIMA da velha e so depois a
@@ -3624,8 +3626,8 @@ class Janela(tk.Tk):
 
     def _dica_mostrar(self, pacote: str, nome: str, dono) -> None:
         self._dica_id = None
-        if not dono.winfo_exists():
-            return
+        if not self._mouse_sobre(dono):
+            return                      # trocou de tela antes dos 600 ms
         self._dica_esconder()
         dica = tk.Toplevel(self)
         dica.overrideredirect(True)
@@ -3645,6 +3647,7 @@ class Janela(tk.Tk):
         dica.geometry("+%d+%d" % (x + E.px(14), y + E.px(16)))
         self._dica = dica
         self._dica_de = pacote
+        self._dica_dono = dono
 
         guardado = self._uso_cache.get(pacote)
         if guardado and time.monotonic() - guardado[0] < 3.0:
@@ -3671,6 +3674,28 @@ class Janela(tk.Tk):
                                      name="uso").start()))
 
         threading.Thread(target=trabalho, daemon=True, name="uso").start()
+
+    def _mouse_sobre(self, dono) -> bool:
+        """O mouse esta em cima de `dono`, a vista, com a janela aberta?"""
+        try:
+            if not dono.winfo_exists() or not dono.winfo_viewable() or \
+                    not self._visivel or self.state() == "iconic":
+                return False
+            x, y = self.winfo_pointerxy()
+            alvo = self.winfo_containing(x, y)
+            return alvo is not None and str(alvo).startswith(str(dono))
+        except Exception:
+            return False
+
+    def _conferir_dica(self) -> None:
+        """(01/out, relato dele: o quadro de uso ficava na tela ao trocar de
+        aba ou minimizar -- o "saiu" do mouse nunca chegava) No relogio: o
+        mouse saiu do app por qualquer caminho -> o quadro some."""
+        if self._dica is None:
+            return
+        if not self._mouse_sobre(getattr(self, "_dica_dono", None)):
+            self._dica_cancelar()
+            self._dica_esconder()
 
     def _dica_texto(self, pacote: str, uso: dict, rotulo) -> None:
         if self._dica_de != pacote or not rotulo.winfo_exists():
@@ -6372,6 +6397,7 @@ class Janela(tk.Tk):
         self._parte_do_giro(self._giro_chamado)
         self._parte_do_giro(self._giro_atalhos)
         self._parte_do_giro(self._giro_notif)
+        self._parte_do_giro(self._conferir_dica)
         # (r120) Medidor do status ligado pela previa (ao conectar) com a
         # janela escondida: so desligava quando algo repintava a janela,
         # e o celular seguia sendo lido sem ninguem olhando.
