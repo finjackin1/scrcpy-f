@@ -49,7 +49,7 @@ JAR_NO_CELULAR = "/data/local/tmp/scrcpyf-notif.jar"
 HISTORICO_HORAS = 24
 HISTORICO_MAX = 500
 CONFERENCIA_S = 20.0
-JUNTAR_RAJADA_S = 0.15
+JUNTAR_RAJADA_S = 0.03            # (01/out) era 0,15: o atraso era sentido
 
 # A conversa que obedece pedidos (uma linha por pedido, "@fim" no fim de
 # cada resposta). O `M=` deixa a marca na linha de comando (pkill).
@@ -57,7 +57,8 @@ SERVIDOR = (
     "M=%s; "
     # `</dev/null`: o `cmd` do Android repassa a entrada ao servico -- dentro
     # do lote ("G") ele nao pode ler as chaves seguintes.
-    "g(){ cmd notification get \"$1\" </dev/null | sed -n -e '/^  uid=/p' "
+    "g(){ cmd notification get \"$1\" </dev/null | sed -n "
+    "-e '/^NotificationRecord(/p' -e '/^  uid=/p' "
     "-e '/^  flags=/p' -e '/^    when=/p' -e '/^    contentIntent=/p' "
     "-e '/^    extras={/,/^    }/p'; }; "
     "while read c a; do case $c in "
@@ -67,6 +68,9 @@ SERVIDOR = (
     "G) while read k; do if [ \"$k\" = . ]; then break; fi; "
     "echo \"@k $k\"; g \"$k\"; done;; "
     "b) dumpsys notification | grep 'AppSettings:' | grep 'importance=NONE';; "
+    # p: a tela de "configuracoes de notificacao" do proprio app, se tiver
+    "p) cmd package query-activities --brief -a android.intent.action.MAIN "
+    "-c android.intent.category.NOTIFICATION_PREFERENCES \"$a\" </dev/null;; "
     "esac; echo @fim; done" % MARCA)
 EVENTOS = ("logcat -b events -v epoch -T 1 -s notification_enqueue:I "
            "notification_cancel:I notification_cancel_all:I %s:S" % MARCA)
@@ -82,7 +86,7 @@ class Notif:
     """Uma notificacao ativa no celular."""
 
     __slots__ = ("chave", "pacote", "usuario", "quando", "titulo", "texto",
-                 "subtexto", "flags", "sdk", "alvo")
+                 "subtexto", "flags", "sdk", "alvo", "canal")
 
     def __init__(self, chave: str, pacote: str, usuario: int, quando: int,
                  titulo: str, texto: str, subtexto: str, flags: set) -> None:
@@ -99,6 +103,7 @@ class Notif:
         # tipo) do "contentIntent=" -- o destino de verdade se le na hora
         # do clique (`Central.destino`). None = a notificacao nao abre nada.
         self.alvo = None
+        self.canal = ""                   # a categoria (canal) do Android
 
     @property
     def app(self) -> str:
@@ -156,6 +161,7 @@ def ler_detalhe(chave: str, texto: str) -> Notif | None:
     usuario = 0
     quando = 0
     alvo = None
+    canal = ""
     flags: set = set()
     extras: dict = {}
     atual = None
@@ -192,6 +198,11 @@ def ler_detalhe(chave: str, texto: str) -> Notif | None:
                       r"\{(\w+) (\S+) (\w+)\}", linha)
         if m:
             alvo = (m.group(1), m.group(2), m.group(3))
+            continue
+        if linha.startswith("NotificationRecord("):
+            m = re.search(r"Notification\(channel=([^ )]+)", linha)
+            if m and m.group(1) != "null":
+                canal = m.group(1)
     if not extras and not flags and not quando:
         return None
     titulo = _valor(extras.get("android.title", "")) or \
@@ -202,6 +213,7 @@ def ler_detalhe(chave: str, texto: str) -> Notif | None:
               titulo, texto_, _valor(extras.get("android.subText", "")),
               flags)
     n.alvo = alvo
+    n.canal = canal
     return n
 
 
@@ -248,6 +260,42 @@ def argumentos_am(destino: dict) -> list[str]:
         flg = 0
     args += ["-f", "0x%x" % (flg | 0x10000000)]       # NEW_TASK sempre
     return args
+
+
+CONFIGURACOES = "com.android.settings"
+
+
+def telas_da_notificacao(n, prefs: str = "") -> list:
+    """
+    (01/out, pedido dele) O que o Android oferece ao SEGURAR uma
+    notificacao, como telas para abrir numa janela do PC: [(rotulo,
+    janela, argumentos do am start)]. "desativar notificacoes" e
+    "configuracoes" sao as telas das Configuracoes do Android (a do app e a
+    da categoria/canal); "configuracoes do app" e a tela que o proprio app
+    declara (NOTIFICATION_PREFERENCES -- os apps do sistema com configuracao
+    propria); "informacoes do app" e a pagina do app.
+    """
+    pkg = n.pacote
+    base = ["--es", "android.provider.extra.APP_PACKAGE", pkg]
+    uid = n.chave.rsplit("|", 1)[-1]
+    if n.usuario > 0 and uid.isdigit():
+        base += ["--ei", "android.provider.extra.APP_UID", uid]
+    novo = ["-f", "0x10000000"]
+    do_app = ["-a", "android.settings.APP_NOTIFICATION_SETTINGS"] + base + novo
+    telas = [("desativar notificações", CONFIGURACOES, do_app)]
+    if n.canal:
+        telas.append(("configurações", CONFIGURACOES,
+                      ["-a", "android.settings.CHANNEL_NOTIFICATION_SETTINGS"]
+                      + base + ["--es", "android.provider.extra.CHANNEL_ID",
+                                n.canal] + novo))
+    else:
+        telas.append(("configurações", CONFIGURACOES, do_app))
+    if prefs:
+        telas.append(("configurações do app", n.app, ["-n", prefs] + novo))
+    telas.append(("informações do app", CONFIGURACOES,
+                  ["-a", "android.settings.APPLICATION_DETAILS_SETTINGS",
+                   "-d", "package:" + pkg] + novo))
+    return telas
 
 
 def pacote_do_destino(destino: dict) -> str:
@@ -334,7 +382,9 @@ class Central:
         self._geracao = 0
         self._procs: list = []
         self._sujo = threading.Event()
-        self._pedidas: set = set()        # chaves com "chegou" (podem ter mudado)
+        self._eventos: list = []          # (tipo, chave, hora) do logcat
+        self._medidas = 0                 # quantas chegadas ja medidas
+        self.prefs: dict = {}             # pacote -> tela de config. propria
         self._servidor = None
         self._srv_trava = threading.Lock()
         self._pronto = False              # 1a leitura feita (antes nao avisa)
@@ -371,6 +421,9 @@ class Central:
         self._tentou_em = time.monotonic()
         self._geracao += 1
         self._subindo = True
+        self._medidas = 0
+        with self._trava:
+            self._eventos = []
         self._carregar_historico()
         threading.Thread(target=self._subir, args=(serial, self._geracao),
                          daemon=True, name="notif").start()
@@ -512,6 +565,8 @@ class Central:
                 linhas.append(linha)
 
     def _ler_eventos(self, proc, geracao: int) -> None:
+        """Cada evento vai para a fila com a CHAVE da notificacao (o
+        logcat ja diz qual chegou/saiu) e a hora em que chegou ao PC."""
         try:
             for bruta in proc.stdout:
                 if geracao != self._geracao:
@@ -519,9 +574,8 @@ class Central:
                 tipo, chave = ler_evento(bruta.decode("utf-8", errors="replace"))
                 if not tipo:
                     continue
-                if tipo == "chegou" and chave:
-                    with self._trava:
-                        self._pedidas.add(chave)
+                with self._trava:
+                    self._eventos.append((tipo, chave, time.monotonic()))
                 self._sujo.set()
         except Exception:
             log.exception("notificacoes: leitor de eventos")
@@ -541,8 +595,18 @@ class Central:
             if acordou:
                 time.sleep(JUNTAR_RAJADA_S)   # junta a rajada de eventos
             self._sujo.clear()
+            with self._trava:
+                eventos, self._eventos = self._eventos, []
             try:
-                self._reler(completa)
+                # (01/out, "demorando pra aparecer") CAMINHO CURTO: o evento
+                # ja diz QUAL notificacao chegou/saiu -- detalha so ela, sem
+                # pedir a lista inteira antes. A lista inteira so na 1a
+                # leitura, no "saiu tudo de um app", em evento sem chave e na
+                # conferencia de 20 s.
+                if completa or not eventos or any(
+                        t == "tudo" or not k for t, k, _q in eventos) or \
+                        not self._aplicar_eventos(eventos):
+                    self._reler(completa)
             except Exception:
                 log.exception("notificacoes: releitura")
             if completa:
@@ -553,6 +617,48 @@ class Central:
                 self.anotar("notificacoes: a conversa com o celular caiu")
                 break
 
+    def _detalhar(self, chaves: list) -> dict | None:
+        """{chave: Notif} das chaves pedidas, numa ida so ("G"). None =
+        a conversa falhou."""
+        if not chaves:
+            return {}
+        linhas = self._pedir("G", espera=6 + 0.3 * len(chaves),
+                             entrada=list(chaves) + ["."])
+        if linhas is None:
+            return None
+        saida = {}
+        for chave, texto in _separar_por_chave(linhas):
+            n = ler_detalhe(chave, texto)
+            if n is not None:
+                n.sdk = self.sdk
+                saida[chave] = n
+        return saida
+
+    def _aplicar_eventos(self, eventos: list) -> bool:
+        """Aplica uma rajada de eventos com chave. False = nao deu (chave
+        que o celular nao reconhece etc.): quem chamou rele a lista toda."""
+        final: dict = {}
+        for tipo, chave, _q in eventos:
+            final[chave] = tipo            # o ultimo de cada chave vale
+        chegou = [k for k, t in final.items() if t == "chegou"]
+        detalhes = self._detalhar(chegou)
+        if detalhes is None:
+            return True                    # conversa caida: nada a fazer
+        if any(k not in detalhes for k in chegou):
+            return False
+        with self._trava:
+            antigas = dict(self.ativas)
+        novas = dict(antigas)
+        # No "saiu" o ultimo campo e o uid de QUEM tirou (a barra do sistema,
+        # o shell...), nao o do app: compara sem ele.
+        saiu = {k.rsplit("|", 1)[0] for k, t in final.items() if t == "saiu"}
+        if saiu:
+            for k in [k for k in novas if k.rsplit("|", 1)[0] in saiu]:
+                novas.pop(k)
+        novas.update(detalhes)
+        self._aplicar(novas, antigas, min(q for _t, _k, q in eventos))
+        return True
+
     def _reler(self, completa: bool) -> None:
         resposta = self._pedir("l")
         if resposta is None:
@@ -560,21 +666,18 @@ class Central:
         chaves = [x.strip() for x in resposta if x.strip().count("|") >= 4]
         with self._trava:
             antigas = dict(self.ativas)
-            pedidas, self._pedidas = self._pedidas, set()
-        detalhar = [c for c in chaves
-                    if completa or c not in antigas or c in pedidas]
+        detalhar = [c for c in chaves if completa or c not in antigas]
         novas = {c: antigas[c] for c in chaves if c in antigas}
-        if detalhar:
-            # Todas numa ida so ("G"): antes uma ida e volta por chave.
-            linhas = self._pedir("G", espera=6 + 0.3 * len(detalhar),
-                                 entrada=detalhar + ["."])
-            if linhas is None:
-                return
-            for chave, texto in _separar_por_chave(linhas):
-                n = ler_detalhe(chave, texto)
-                if n is not None:
-                    n.sdk = self.sdk
-                    novas[chave] = n
+        detalhes = self._detalhar(detalhar)
+        if detalhes is None:
+            return
+        novas.update(detalhes)
+        self._aplicar(novas, antigas, None)
+
+    MEDIR_PRIMEIRAS = 5
+
+    def _aplicar(self, novas: dict, antigas: dict, desde) -> None:
+        """Poe a lista nova no lugar: historico, avisos, log e a janela."""
         chegaram = [n for c, n in novas.items()
                     if c not in antigas or antigas[c].conteudo() != n.conteudo()]
         sairam = [n for c, n in antigas.items() if c not in novas]
@@ -598,10 +701,32 @@ class Central:
         importa = [n for n in chegaram if not n.fixa] + sairam
         if importa or primeira:
             self._salvar_logo()
-            self.anotar("notificacoes: %d no celular (+%d -%d)%s"
+            # (01/out) Quanto levou do aviso do celular ate a lista pronta
+            # no PC (as 5 primeiras de cada conexao) -- para medir.
+            medida = ""
+            if desde is not None and self._medidas < self.MEDIR_PRIMEIRAS:
+                self._medidas += 1
+                medida = " em %.0f ms" % ((time.monotonic() - desde) * 1000)
+            self.anotar("notificacoes: %d no celular (+%d -%d)%s%s"
                         % (len(novas), len(chegaram), len(sairam),
-                           " [1a leitura]" if primeira else ""))
+                           " [1a leitura]" if primeira else "", medida))
         self._mudou()
+        self._conferir_prefs({n.pacote for n in novas.values()})
+
+    def _conferir_prefs(self, pacotes) -> None:
+        """A tela de configuracoes de notificacao propria de cada app (uma
+        pergunta por pacote, guardada). Depois de mostrar: nao atrasa."""
+        for pkg in sorted(p for p in pacotes if p not in self.prefs):
+            resposta = self._pedir("p " + pkg, espera=8)
+            if resposta is None:
+                return
+            achou = ""
+            for linha in resposta:
+                m = re.fullmatch(r"\s*(%s/[\w.$]+)\s*" % re.escape(pkg), linha)
+                if m:
+                    achou = m.group(1)
+                    break
+            self.prefs[pkg] = achou
 
     def _ler_bloqueados(self) -> None:
         resposta = self._pedir("b", espera=15)

@@ -978,6 +978,13 @@ class Programa:
         if abre:
             self.pedidos.put(("app", app, self._nome_do_app(app)))
 
+    def abrir_tela(self, janela: str, args: list) -> None:
+        """(01/out) Uma tela do celular (do menu da notificacao: as
+        configuracoes do app, da categoria...) na janela do app `janela`."""
+        self.anotar("notificacao: tela %s (%s)" % (janela, " ".join(args)[:160]))
+        self.pedidos.put(("abrir_destino", janela, self._nome_do_app(janela),
+                          list(args)))
+
     def _abrir_com_destino(self, janela: str, nome: str, args: list) -> None:
         """No laco: a janela do app ja aberta recebe o destino (e vem para a
         frente); fechada, abre ja com ele (sem o --start-app)."""

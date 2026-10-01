@@ -2163,7 +2163,17 @@ class Janela(tk.Tk):
             opcoes.append(("desligar notificações no pc" if ligada else
                            "ligar notificações no pc",
                            lambda: self._virar_notif_app(pacote, not ligada)))
-        for texto, acao in opcoes:
+        self._encher_menu(menu, corpo, evento, opcoes)
+
+    def _encher_menu(self, menu, corpo, evento, opcoes) -> None:
+        """Itens do menu do botao direito (apps e notificacoes). `None` na
+        lista = um risco separando grupos."""
+        for opcao in opcoes:
+            if opcao is None:
+                tk.Frame(corpo, bg=E.LINHA, height=1).pack(
+                    side="top", fill="x", pady=E.px(2))
+                continue
+            texto, acao = opcao
             item = tk.Label(corpo, text=texto, bg=E.FUNDO_FUNDO, fg=E.TEXTO,
                             font=E.fonte(E.PEQUENA), anchor="w",
                             cursor="hand2", padx=E.px(12), pady=E.px(5))
@@ -2180,6 +2190,44 @@ class Janela(tk.Tk):
         self._menu_app = menu
         self._dica_cancelar()
         self._dica_esconder()
+
+    def _menu_notif(self, evento, app: str, chave: str) -> None:
+        """
+        (01/out, pedido dele) BOTAO DIREITO NUMA NOTIFICACAO = o que o
+        Android mostra ao segurar ela: desativar notificacoes e
+        configuracoes (as telas das Configuracoes do Android, do app e da
+        categoria), configuracoes do app (a tela propria dos apps do
+        sistema), informacoes do app -- cada uma abre na janela certa do PC.
+        """
+        from . import notificacoes as nt
+        n = next((x for x in self.programa.notif.todas() if x.chave == chave),
+                 None)
+        if n is None:
+            return
+        self._fechar_menu_app()
+        p = self.programa
+        opcoes = []
+        if n.alvo is not None or self._app_abre(app):
+            opcoes.append(("abrir", lambda: self._abrir_notif(app, chave)))
+            opcoes.append(None)
+        for rotulo, janela, args in nt.telas_da_notificacao(
+                n, p.notif.prefs.get(n.pacote, "")):
+            opcoes.append((rotulo, lambda j=janela, a=args:
+                           p.abrir_tela(j, a)))
+        opcoes.append(None)
+        if n.limpavel:
+            opcoes.append(("remover", lambda: self._remover_notif([chave])))
+        ligada = self._config.notif_do_app(app)
+        opcoes.append(("desligar notificações no pc" if ligada else
+                       "ligar notificações no pc",
+                       lambda: self._virar_notif_app(app, not ligada)))
+        menu = tk.Toplevel(self)
+        menu.overrideredirect(True)
+        menu.attributes("-topmost", True)
+        menu.configure(bg=E.LINHA_FORTE)
+        corpo = tk.Frame(menu, bg=E.FUNDO_FUNDO)
+        corpo.pack(padx=1, pady=1)
+        self._encher_menu(menu, corpo, evento, opcoes)
 
     def _criar_atalho_desktop(self, pacote: str, nome: str) -> None:
         """(r160: o nome _criar_atalho ja era o do atalho de TECLADO, mais
@@ -4473,6 +4521,9 @@ class Janela(tk.Tk):
             t.pack(side="top", fill="x", padx=E.px(8))
             pecas.append(t)
         tk.Frame(card, bg=E.FUNDO, height=E.px(5)).pack(side="top")
+        for w in pecas:
+            w.bind("<Button-3>", lambda e, a=app, k=n.chave:
+                   self._menu_notif(e, a, k))
         if abre:
             for w in pecas:
                 w.bind("<Button-1>", lambda _e, a=app, k=n.chave:
@@ -5957,6 +6008,10 @@ class Janela(tk.Tk):
         p = self.programa
         if (p.ligando or p.trocando or p.sessoes
                 or getattr(p, "_trocar_em", None)):
+            return PASSO_MS
+        # (01/out, "as notificacoes demoram a aparecer") Com as notificacoes
+        # no ar o aviso no canto nao pode esperar o relogio lento.
+        if getattr(getattr(p, "notif", None), "_serial", ""):
             return PASSO_MS
         return PASSO_PARADO_MS
 
