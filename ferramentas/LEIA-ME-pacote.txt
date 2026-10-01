@@ -23,12 +23,13 @@ De dois cliques em scrcpy-f.exe. Na primeira vez a janela abre em OPCOES:
      administrador). Ja tem o scrcpy? Clique em "usar outra pasta".
 
   b) Clique em PAREAR, na lista da esquerda:
-       procurar   acha sozinho um celular que o PC ja alcanca -- e so
-                  clicar em "usar".
-       cabo usb   primeira vez, o mais simples: ligue o cabo e clique em
-                  conectar. No fim ele fica conectado sem fio e o cabo
-                  pode sair.
-       codigo     sem cabo, com o codigo de pareamento do Android.
+       conexao    os celulares por perto. Ja pareado: entra sozinho ou e
+                  so clicar em "usar". Novo: clique em "conectar" --
+                  pelo cabo, aceite o aviso no celular; sem fio, abra no
+                  celular "parear com codigo": o endereco aparece sozinho
+                  e voce so digita o codigo. Aqui tambem se escolhe a
+                  conexao preferida: sem fio ou cabo.
+       adicionar  parear a mao, com cabo ou com codigo.
 
 Quando o celular nao aparecer (por exemplo, depois de reiniciar o
 celular), o proprio programa abre o PAREAR sozinho.

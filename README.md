@@ -15,9 +15,11 @@ numa janela própria do Windows.
    administrador). Já tem o scrcpy? Use **usar outra pasta**. Até o scrcpy
    existir, só **Opções › geral** fica liberada.
 3. No celular, ligue a **Depuração sem fio** (Opções do desenvolvedor), deixe
-   na mesma rede Wi-Fi do PC. Um celular já pareado aparece sozinho em
-   **Parear › conexão**; um celular novo entra por **Parear › adicionar**,
-   com cabo USB ou com código.
+   na mesma rede Wi-Fi do PC (ou a **Depuração USB**, com o cabo). Ele
+   aparece em **Parear › conexão**: já pareado, entra sozinho; novo, aparece
+   com **conectar** — pelo cabo basta aceitar o aviso no celular; sem fio, o
+   programa abre a tela do código e preenche o endereço sozinho quando você
+   abre "parear com código" no celular.
 
 O programa fica na bandeja, ao lado do relógio. Clique no ícone para abrir a
 janela; botão direito para o menu.
@@ -35,7 +37,7 @@ recurso não existe na versão dele, em vez de quebrar.
 | **Extensão** (Ctrl+Alt+2) | o celular vira uma tela a mais do PC: o mouse e o teclado passam para ele pela borda (veja abaixo) |
 | **Apps** | cada app do celular numa janela própria do Windows, com o ícone e o nome do app e um botão separado na barra de tarefas. O celular continua livre na sua mão |
 | **Status** | bateria, temperatura, memória e o que mais pesa no celular |
-| **Parear** | **conexão**: o celular em uso, os outros por perto e a conexão preferida — **sem fio** ou **cabo** (trocar não derruba nada: o que está aberto segue como está, o que abrir depois usa a nova). **adicionar**: parear um celular novo, com cabo ou com código. O quadradinho fica verde com o celular conectado, em tempo real |
+| **Parear** | **conexão**: o celular em uso, os outros por perto — inclusive os ainda não conectados, com **conectar** — e a conexão preferida — **sem fio** ou **cabo** (trocar não derruba nada: o que está aberto segue como está, o que abrir depois usa a nova; preferindo o cabo, funciona mesmo sem Wi-Fi). **adicionar**: parear à mão, com cabo ou com código. O quadradinho fica verde com o celular conectado, em tempo real |
 | **Opções** | notificações, abrir com o Windows, página inicial, pasta do scrcpy e atualizações; atalhos de teclado; qualidade de imagem e som **separada por conexão**: **sem fio** (predefinições **leve**, **equilibrado** e **celular**) e **cabo** (**rápido**, **equilibrado** e **máxima** — até 120 quadros, 40 Mb/s e som sem perda), cada uma com até 3 suas; resolução em 480p/720p/1080p/1440p ou a do celular. O programa usa a da conexão em uso, e Espelhar, Extensão e cada app podem ter a sua para cada conexão |
 
 Tudo é gravado no instante do clique, sem botão de salvar.
