@@ -4312,14 +4312,23 @@ class Janela(tk.Tk):
             esq, "todos os apps", self._config.opcao("notif_pc"),
             self._virar_notif_geral, borda=False,
             explicacao="virar esta chave liga ou desliga todos.")
-        E.Texto(esq, "ligada: todos avisam, menos os que você desligar ao "
-                     "lado. desligada: nenhum avisa, menos os que você ligar."
-                     "\n\napp desligado não avisa nem aparece em "
-                     "notificações; o histórico guarda todos. nada disso "
-                     "muda o celular. no botão direito de um app (em apps) "
-                     "também dá para ligar ou desligar.",
+        E.Texto(esq, "ligada: todos avisam, menos os desligados ao lado; "
+                     "desligada: nenhum, menos os ligados. nada disso muda "
+                     "o celular.",
                 cor=E.APAGADO, largura=E.px(230)).pack(
-            side="top", fill="x", pady=(E.px(10), E.px(0)))
+            side="top", fill="x", pady=(E.px(4), E.px(6)))
+        tk.Frame(esq, bg=E.LINHA, height=1).pack(side="top", fill="x")
+        # (01/out) No Windows (central_windows).
+        self._chave(esq, "central do windows",
+                    self._config.opcao("notif_windows"),
+                    lambda v: self._virar_windows_notif("notif_windows", v),
+                    explicacao="também na central de notificações",
+                    borda=False)
+        self._chave(esq, "player no windows",
+                    self._config.opcao("player_windows"),
+                    lambda v: self._virar_windows_notif("player_windows", v),
+                    explicacao="a música nos controles de mídia",
+                    borda=False)
         E.Rotulo(dir_, "por app").pack(side="top", fill="x",
                                       pady=(E.px(0), E.px(6)))
         busca = self._caixa(dir_, getattr(self, "_busca_notif", ""),
@@ -5006,6 +5015,15 @@ class Janela(tk.Tk):
         for w in querido:
             w.pack(side="top", fill="x")
 
+    def _virar_windows_notif(self, nome: str, ligado: bool) -> None:
+        self._virar_opcao(nome, ligado)
+        p = self.programa
+        if nome == "player_windows":
+            m = p.notif.player()
+            p._windows_player(m, p.notif.posicao(m) if m else 0)
+        elif not ligado and p.windows_notif is not None:
+            p.windows_notif.limpar()
+
     def _virar_notif_geral(self, ligado: bool) -> None:
         self._conferir_gravacao(self._config.definir_notif_geral(ligado))
         self.programa.anotar("notificacoes no pc: geral %s (excecoes zeradas)"
@@ -5096,6 +5114,24 @@ class Janela(tk.Tk):
                 n.app, self._nome_notif(n.app), n.titulo or "chamada",
                 n.texto, self.programa.atender_chamada,
                 self.programa.recusar_chamada)
+
+    def abrir_link(self, url: str, tentativa: int = 0) -> None:
+        """
+        (01/out) Clique numa notificacao na Central do Windows
+        ("scrcpyf:notif?c=<chave>&a=<app>"): o mesmo que o clique no aviso.
+        Com o programa recem-aberto o celular ainda nao foi lido: espera
+        ate ~15 s pela notificacao; sem ela, abre o app (ou esta janela).
+        """
+        from . import central_windows
+        chave, app = central_windows.ler_endereco(url)
+        self.programa.anotar("windows: clique na central (%s)" % (app or url))
+        n = next((x for x in self.programa.notif.todas() if x.chave == chave),
+                 None)
+        if n is None and tentativa < 30 and \
+                not self.programa.notif.todas():
+            self.after(500, lambda: self.abrir_link(url, tentativa + 1))
+            return
+        self._clicou_aviso(app, chave)
 
     def _clicou_aviso(self, app: str, chave: str = "") -> None:
         """Clique no aviso: o que o toque no celular abriria, numa janela do
@@ -6370,6 +6406,8 @@ class Janela(tk.Tk):
             if pedido[0] == "app" and len(pedido) >= 2:
                 self.programa.abrir_pelo_atalho(
                     pedido[1], pedido[2] if len(pedido) > 2 else "")
+            elif pedido[0] == "link" and len(pedido) >= 2:
+                self.abrir_link(pedido[1])
             else:
                 self.mostrar()
 

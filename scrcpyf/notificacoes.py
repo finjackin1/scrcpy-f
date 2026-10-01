@@ -455,6 +455,11 @@ class Central:
         self.midias_versao = 0
         self.chamada = None               # Notif da chamada TOCANDO, ou None
         self._player_fechado = None       # (pacote, quando) do x do player
+        # (01/out) Ganchos do Windows (central_windows, pelo programa):
+        # ao_chegar(n) / ao_sair(n) / ao_limpar() / ao_player(m) -- de outra
+        # thread; erro neles nao derruba nada (`_ganchos`).
+        self.ao_chegar = self.ao_sair = self.ao_limpar = None
+        self.ao_player = None
 
     # -- vida -----------------------------------------------------------------
 
@@ -533,6 +538,9 @@ class Central:
             self._pronto = False
         if mudou:
             self._mudou()
+        self._avisar_player()                # sem celular: some do Windows
+        if self.ao_limpar is not None and serial:
+            self._ganchos(self.ao_limpar)
 
     def _rodar(self, args, espera=15) -> str:
         try:
@@ -659,6 +667,7 @@ class Central:
             self.midias_versao += 1          # a posicao (barra) se acerta
         if mudou:
             self._mudou()
+        self._avisar_player()                # o Windows (e a posicao dele)
 
     def fechar_player(self, pacote: str) -> None:
         """
@@ -677,6 +686,7 @@ class Central:
         if chaves:
             self.remover(chaves)
         self._mudou()
+        self._avisar_player()
 
     def player(self) -> dict | None:
         """A sessao a mostrar: a que esta tocando; senao a pausada mais
@@ -900,16 +910,22 @@ class Central:
             primeira = not self._pronto
             self._pronto = True
         agora = int(time.time() * 1000)
+        if primeira and self.ao_limpar is not None:
+            self._ganchos(self.ao_limpar)      # a Central do Windows recomeca
         for n in chegaram:
             if not n.fixa and not n.resumo:
                 self._guardar_no_historico(n)
                 # A chamada tem aviso proprio (ver `chamada`).
                 if not primeira and self.ligada(n.app) and \
-                        n.categoria != "call" and \
-                        (self.pode_avisar is None or self.pode_avisar(n.app)):
-                    self._avisos.put(n)
+                        n.categoria != "call":
+                    if self.pode_avisar is None or self.pode_avisar(n.app):
+                        self._avisos.put(n)
+                    if self.ao_chegar is not None:
+                        self._ganchos(self.ao_chegar, n)
         for n in sairam:
             self._marcar_saida(n, agora)
+            if self.ao_sair is not None:
+                self._ganchos(self.ao_sair, n)
         # Fixa que so se atualiza ("carregando: 2 h 55 min", a cada ~40 s)
         # nao vai para o log nem para o historico.
         importa = [n for n in chegaram if not n.fixa] + sairam
@@ -981,6 +997,18 @@ class Central:
         if self._servidor is not None:
             threading.Thread(target=self._ler_bloqueados, daemon=True,
                              name="notif-bloq").start()
+
+    def _ganchos(self, funcao, *args) -> None:
+        try:
+            funcao(*args)
+        except Exception:
+            log.exception("notificacoes: gancho do windows")
+
+    def _avisar_player(self) -> None:
+        if self.ao_player is not None:
+            m = self.player()
+            self._ganchos(self.ao_player, m,
+                          self.posicao(m) if m is not None else 0)
 
     def _mudou(self) -> None:
         self.versao += 1
@@ -1074,6 +1102,8 @@ class Central:
             agora = int(time.time() * 1000)
             for n in tiradas:
                 self._marcar_saida(n, agora)
+                if self.ao_sair is not None:
+                    self._ganchos(self.ao_sair, n)
             self._salvar_logo()
             self._mudou()
         if iniciar:

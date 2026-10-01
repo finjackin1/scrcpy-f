@@ -69,6 +69,10 @@ OPCOES_DE_FABRICA = {
     # (01/out) Notificacoes do celular no PC: a chave GERAL (o padrao de
     # todos os apps; cada app pode ser excecao em apps["notif"]).
     "notif_pc": True,
+    # (01/out) No Windows: as notificacoes tambem na Central de Notificacoes
+    # e o player nos controles de midia (central_windows).
+    "notif_windows": True,
+    "player_windows": True,
 }
 
 # Os dois arquivos soltos da versao de scripts. Existem so para a migracao da

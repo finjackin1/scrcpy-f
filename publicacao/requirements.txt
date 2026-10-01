@@ -9,3 +9,15 @@
 
 pystray>=0.19
 Pillow>=10.0
+
+# (01/out/2026) As notificacoes e o player do celular no Windows (Central de
+# Notificacoes e controles de midia): pywinrt, so as partes usadas.
+winrt-runtime>=3.2
+winrt-Windows.Foundation>=3.2
+winrt-Windows.Foundation.Collections>=3.2
+winrt-Windows.Media>=3.2
+winrt-Windows.Media.Playback>=3.2
+winrt-Windows.Storage>=3.2
+winrt-Windows.Storage.Streams>=3.2
+winrt-Windows.UI.Notifications>=3.2
+winrt-Windows.Data.Xml.Dom>=3.2

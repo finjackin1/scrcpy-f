@@ -309,6 +309,21 @@ class Programa:
             lambda: self.config.adb_exe, self.config, self.anotar,
             lambda: self.pedidos.put(("notif",)), self.pasta_do_celular,
             self._pode_avisar_notif)
+        # (01/out) NO WINDOWS (`central_windows`): as notificacoes tambem na
+        # Central de Notificacoes e o player nos controles de midia.
+        from . import central_windows
+        self.windows_notif = self.windows_player = None
+        if central_windows.disponivel():
+            self.windows_notif = central_windows.NotificacoesWindows(
+                self.anotar)
+            self.windows_player = central_windows.PlayerWindows(
+                self._botao_windows, self.anotar)
+            self.notif.ao_chegar = self._windows_chegou
+            self.notif.ao_sair = lambda n: self.windows_notif.remover(n.chave)
+            self.notif.ao_limpar = self.windows_notif.limpar
+            self.notif.ao_player = self._windows_player
+            threading.Thread(target=self._registrar_windows, daemon=True,
+                             name="windows-registro").start()
         # (r191) As threads que falam com o adb sobem SO AGORA, com o
         # objeto inteiro montado (antes subiam no meio do __init__ e o
         # vigia da conexao podia ler `adb_pausado`/`_sair` antes de
@@ -894,6 +909,65 @@ class Programa:
         sessao = self.sessoes.get(nome)
         pid = getattr(sessao, "pid", 0) if sessao is not None else 0
         return janela_scrcpy.achar(pid) if pid else None
+
+    # -- no Windows (01/out) -----------------------------------------------
+
+    def _registrar_windows(self) -> None:
+        """O scrcpy-f com nome e icone na Central do Windows, e o protocolo
+        "scrcpyf:" do clique nas notificacoes (HKCU, sem admin)."""
+        from . import atalho_desktop, central_windows
+        try:
+            pasta = icone.gravar_para_janela(caminhos.pasta_dados(),
+                                             self.config.scrcpy_exe)
+            png = (pasta / "scrcpy.png") if pasta is not None else \
+                caminhos.pasta_dados() / "icone-janela.png"
+            exe, args = atalho_desktop.alvo_do_programa()
+            if central_windows.registrar(png, [exe] + list(args)):
+                self.anotar("windows: scrcpy-f registrado (central e scrcpyf:)")
+        except Exception:
+            log.exception("windows: registro")
+
+    def _nome_windows(self, app: str) -> str:
+        from . import notificacoes
+        nome = self._nome_do_app(app)
+        if nome == app:
+            pacote = app.split(COPIA)[0]
+            nome = notificacoes.nome_de_sistema(pacote) or \
+                pacote.split(".")[-1]
+        return nome
+
+    def _icone_windows(self, app: str):
+        try:
+            arq = self.pasta_de_icones() / (app + ".png")
+            return arq if arq.exists() else None
+        except Exception:
+            return None
+
+    def _windows_chegou(self, n) -> None:
+        if self.windows_notif is None or \
+                not self.config.opcao("notif_windows"):
+            return
+        self.windows_notif.mostrar(n.chave, n.app, self._nome_windows(n.app),
+                                   n.titulo, n.texto or n.subtexto,
+                                   self._icone_windows(n.app))
+
+    def _windows_player(self, m, posicao: int) -> None:
+        if self.windows_player is None:
+            return
+        if not self.config.opcao("player_windows"):
+            m = None
+        app = m["pacote"] if m else ""
+        self.windows_player.atualizar(m, posicao, self._nome_windows(app)
+                                      if m else "", self._icone_windows(app)
+                                      if m else None)
+
+    def _botao_windows(self, acao: str, ms: int) -> None:
+        """Botao (ou tecla de midia) dos controles do Windows -> o celular."""
+        m = self.notif.player()
+        if not m:
+            return
+        self.anotar("player (windows): %s" % acao)
+        self.notif.midia_comando(m["pacote"], acao, ms)
 
     def _icones_das_notificacoes(self) -> None:
         """(01/out) O icone de quem manda notificacao e nao esta na lista de
@@ -4400,6 +4474,11 @@ class Programa:
 
         passo("status", self.desligar_status)
         passo("notificacoes", lambda: self.notif.parar(esperar=True))
+        if self.windows_player is not None:
+            passo("windows: player", self.windows_player.encerrar)
+        if self.windows_notif is not None:
+            # O que ficou na Central nao teria mais como sair dela: limpa.
+            passo("windows: central", self.windows_notif.limpar)
         for nome in list(self.sessoes):
             passo(nome, lambda n=nome: self.desligar(n, esperar=True))
         passo("sono", self._parar_vigia_sono)        # solta a tela do celular

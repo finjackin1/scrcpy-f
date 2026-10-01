@@ -64,6 +64,9 @@ ocultos = [
     "PIL._tkinter_finder",   # ImageTk -- os desenhos da janela
     "pystray._win32",        # backend da bandeja no Windows
 ]
+# (01/out/2026) pywinrt (central_windows): importado dentro de funcoes.
+from PyInstaller.utils.hooks import collect_submodules as _subs
+ocultos += _subs("winrt")
 
 # O que NAO entra: so esta instalado na maquina de quem publica por ser
 # dependencia de outra coisa, e cada um pesa dezenas de MB. `tkinter` NAO

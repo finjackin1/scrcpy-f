@@ -61,6 +61,12 @@ def main() -> int:
     # (r159) ATALHO DE APP NA AREA DE TRABALHO: "--app <pacote> --nome X".
     from scrcpyf import atalho_desktop
     app_pedido, app_nome = atalho_desktop.ler_argumentos(sys.argv[1:])
+    # (01/out) Clique numa notificacao na Central do Windows: o protocolo
+    # "scrcpyf:" abre o programa com "--link <endereco>" (central_windows).
+    link = ""
+    if "--link" in sys.argv[1:]:
+        i = sys.argv.index("--link")
+        link = sys.argv[i + 1] if i + 1 < len(sys.argv) else ""
     if not sistema.instancia_unica():
         # Subiu pelo Windows e ja tem um aberto: sai quieto (nada de janela).
         if "--inicio" in sys.argv[1:]:
@@ -68,7 +74,8 @@ def main() -> int:
         # O pedido vai ANTES do sinal: quem atende le e abre so o app. Sem
         # atalho, um pedido VAZIO -- apaga qualquer sobra antiga.
         sistema.deixar_pedido("app\t%s\t%s" % (app_pedido, app_nome)
-                              if app_pedido else "")
+                              if app_pedido else
+                              ("link\t%s" % link) if link else "")
         if sistema.chamar_a_outra():
             return 0
         # `esperar` porque o programa sai logo depois: em thread, a caixa
@@ -161,6 +168,8 @@ def main() -> int:
                 # Sem o scrcpy apontado nada funciona: a janela abre sozinha,
                 # direto onde se escolhe a pasta.
                 janela.abrir_em("opcoes")
+            elif link:
+                janela.after(300, lambda: janela.abrir_link(link))
             if primeira_vez or not tem_bandeja or programa.config.opcao(
                     "abrir_janela_ao_iniciar"):
                 janela.after(150, janela.mostrar)

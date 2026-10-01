@@ -27,6 +27,13 @@ Pillow >= 10.0
   Copyright (c) Jeffrey A. Clark e contribuidores
   https://github.com/python-pillow/Pillow
 
+pywinrt (winrt-runtime e winrt-Windows.*) >= 3.2
+  MIT License
+  Copyright (c) Microsoft Corporation; Copyright (c) 2021-2025 David Lechner
+  https://github.com/pywinrt/pywinrt
+  Usado para as notificacoes e o player do celular aparecerem no Windows
+  (Central de Notificacoes e controles de midia).
+
 
 2. TEMPO DE EXECUCAO
 --------------------
