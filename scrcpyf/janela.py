@@ -3673,11 +3673,6 @@ class Janela(tk.Tk):
         detalhe.pack(side="top", fill="x", pady=(E.px(2), E.px(0)))
         self._ui["cel_nome"] = nome
         self._ui["cel_detalhe"] = detalhe
-        vazio = tk.Frame(esq, bg=E.FUNDO)
-        self._ui["cel_vazio"] = vazio
-        E.Botao(vazio, "adicionar celular",
-                lambda: self._escolher_aba("adicionar"), tipo="acao").pack(
-            side="top", fill="x", pady=(E.px(12), E.px(0)))
         self._seletor_de_conexao(esq)
 
         E.Rotulo(dir_, "outros celulares").pack(side="top", fill="x",
@@ -3688,10 +3683,10 @@ class Janela(tk.Tk):
         self._status(dir_)
         rodape = tk.Frame(dir_, bg=E.FUNDO)
         rodape.pack(side="bottom", fill="x")
+        # (01/out) O link "adicionar ›" saiu (pedido dele): a aba ADICIONAR
+        # ja esta na barra de cima.
         self._link(rodape, "procurar de novo", self._procurar).pack(
             side="left")
-        self._link(rodape, "adicionar ›",
-                   lambda: self._escolher_aba("adicionar")).pack(side="right")
         self._pintar_celular_em_uso()
         self._mostrar_achados()
         self.after(150, self._talvez_procurar)
@@ -3701,7 +3696,6 @@ class Janela(tk.Tk):
         if nome is None or not nome.winfo_exists():
             return
         cel = self.programa.celular or {}
-        vazio = self._ui["cel_vazio"]
         if cel.get("serial"):
             partes = []
             if cel.get("bateria") is not None:
@@ -3712,20 +3706,18 @@ class Janela(tk.Tk):
             pintura = ((cel.get("modelo") or "celular").upper(), E.VERDE,
                        "  ·  ".join(partes), False)
         else:
+            # (01/out) O botao "adicionar celular" saiu: quem esta por perto
+            # aparece na lista ao lado, com "conectar".
             pintura = ("NENHUM CELULAR", E.APAGADO,
-                       "ligue a depuração sem fio (ou o cabo) no celular, "
-                       "ou adicione um celular novo.", True)
+                       "ligue no celular a depuração sem fio (ou a usb, com "
+                       "o cabo): ele aparece ao lado para conectar.", True)
         if pintura == getattr(self, "_cel_pintado", None) and \
                 nome.cget("text"):
             return
         self._cel_pintado = pintura
-        texto, cor, det, sem = pintura
+        texto, cor, det, _sem = pintura
         nome.configure(text=texto, fg=cor)
         self._ui["cel_detalhe"].configure(text=det)
-        if sem and not vazio.winfo_ismapped():
-            vazio.pack(side="top", fill="x", after=self._ui["cel_detalhe"])
-        elif not sem and vazio.winfo_ismapped():
-            vazio.pack_forget()
 
     def _conferir_outros(self) -> None:
         """(r193) OUTROS CELULARES AO VIVO: o adb viu alguem entrar ou sair
@@ -3766,7 +3758,8 @@ class Janela(tk.Tk):
             explica = ("sem cabo, android 11 ou mais novo.\n\nno celular: "
                        "opções do desenvolvedor › depuração sem fio › "
                        "\"parear o dispositivo com código de pareamento\". "
-                       "digite ao lado o endereço e o código que aparecem.")
+                       "o endereço aparece sozinho ao lado; digite o "
+                       "código.")
         E.Texto(esq, explica, largura=E.px(230)).pack(
             side="top", fill="x", pady=(E.px(12), E.px(0)))
         if self._metodo == "cabo":
@@ -3829,6 +3822,8 @@ class Janela(tk.Tk):
 
     def _e_o_em_uso(self, achado) -> bool:
         cel = self.programa.celular or {}
+        if achado.estado != conexao.PRONTO:
+            return False        # (01/out) mesmo modelo nao e o mesmo aparelho
         return bool(cel.get("serial")) and (
             achado.serial == cel.get("serial") or
             (bool(cel.get("modelo")) and achado.modelo == cel.get("modelo")))
@@ -3857,7 +3852,11 @@ class Janela(tk.Tk):
             linha = tk.Frame(lista, bg=E.FUNDO, highlightthickness=1,
                              highlightbackground=E.LINHA)
             linha.pack(side="top", fill="x", pady=(E.px(0), E.px(5)))
-            E.Botao(linha, "usar", lambda a=achado: self._usar(a),
+            # (01/out) Nao conectado ainda: "conectar" leva ao jeito certo
+            # (cabo = o fluxo do cabo; sem fio nunca pareado = o codigo).
+            pronto = achado.estado == conexao.PRONTO
+            E.Botao(linha, "usar" if pronto else "conectar",
+                    lambda a=achado: self._usar(a),
                     tipo="contorno" if self.programa.celular else "acao"
                     ).pack(side="right", padx=E.px(4), pady=E.px(4))
             textos = tk.Frame(linha, bg=E.FUNDO)
@@ -3865,9 +3864,16 @@ class Janela(tk.Tk):
             tk.Label(textos, text=achado.modelo.upper(), bg=E.FUNDO,
                      fg=E.TEXTO, font=E.fonte(E.PEQUENA), anchor="w").pack(
                 side="top", fill="x")
-            tk.Label(textos, text=("sem fio" + (" · %s" % achado.endereco
-                                                if achado.endereco else ""))
-                     if achado.sem_fio else "pelo cabo", bg=E.FUNDO,
+            if achado.estado == conexao.PERMITIR:
+                sub = "cabo · falta permitir"
+            elif achado.estado == conexao.PAREAR:
+                sub = "sem fio · falta parear"
+            elif achado.sem_fio:
+                sub = "sem fio" + (" · %s" % achado.endereco
+                                   if achado.endereco else "")
+            else:
+                sub = "pelo cabo"
+            tk.Label(textos, text=sub, bg=E.FUNDO,
                      fg=E.APAGADO, font=E.fonte(E.ROTULO), anchor="w").pack(
                 side="top", fill="x")
 
@@ -3904,6 +3910,12 @@ class Janela(tk.Tk):
         # nela (o filtro de `_mostrar_achados` tira so o novo em uso).
         # (r193) "usar" num celular da lista = ESTE celular (antes o programa
         # procurava de novo e, com dois, podia ficar com o outro).
+        if achado.estado == conexao.PERMITIR:
+            self._conectar_cabo()       # espera o "Permitir" e segue
+            return
+        if achado.estado == conexao.PAREAR:
+            self._ir_parear(achado.endereco)
+            return
         self._usando = achado.serial
         if not achado.sem_fio:
             if self.programa.conexao_preferida() == "cabo":
@@ -3959,6 +3971,61 @@ class Janela(tk.Tk):
         b.definir(ligado=not self._trabalhando)
         self._ui["acao_parear"] = b
         self._status(dir_)
+        self._endereco_auto = ""
+        self._pedir_endereco()
+
+    # (01/out) O ENDERECO SE PREENCHE SOZINHO: com a tela "parear com codigo"
+    # aberta, o celular anuncia o endereco do parear na rede. Enquanto a tela
+    # do codigo esta a vista, o programa pergunta ao adb a cada 1,5 s e poe
+    # no campo (sem apagar o que a pessoa digitou); ela so digita o codigo.
+
+    def _ir_parear(self, ip: str = "") -> None:
+        """"conectar" num celular sem fio nunca pareado: vai direto ao codigo."""
+        self._ip_parear = ip
+        self._metodo = "codigo"
+        self._escolher_aba("adicionar")
+
+    def _na_tela_do_codigo(self) -> bool:
+        return (self._item == "parear" and self._aba["parear"] == "adicionar"
+                and self._metodo == "codigo")
+
+    def _pedir_endereco(self) -> None:
+        if getattr(self, "_perguntando_endereco", False):
+            return
+        if not self._na_tela_do_codigo() or not self._visivel:
+            return
+        adb = self._config.adb_exe
+        ip = getattr(self, "_ip_parear", "")
+        self._perguntando_endereco = True
+
+        def perguntar():
+            try:
+                endereco = conexao.endereco_de_parear(adb, ip)
+            except Exception:
+                endereco = ""
+            self._da_outra_thread.put(
+                lambda e=endereco: self._chegou_endereco(e))
+
+        threading.Thread(target=perguntar, daemon=True,
+                         name="endereco-parear").start()
+
+    def _chegou_endereco(self, endereco: str) -> None:
+        self._perguntando_endereco = False
+        if not self._na_tela_do_codigo():
+            return
+        campo = self._ui.get("campo_endereco")
+        if endereco and campo is not None and campo.winfo_exists():
+            atual = campo.get().strip()
+            if atual in ("", self._endereco_auto) and atual != endereco:
+                campo.delete(0, "end")
+                campo.insert(0, endereco)
+                self._endereco_auto = endereco
+                codigo = self._ui.get("campo_codigo")
+                if codigo is not None and not codigo.get().strip():
+                    codigo.focus_set()
+                self.programa.anotar("parear: endereco achado na rede (%s)"
+                                     % endereco)
+        self.after(1500, self._pedir_endereco)
 
     def _campo(self, pai, rotulo: str, dica: str) -> tk.Entry:
         linha = tk.Frame(pai, bg=E.FUNDO)
@@ -4049,7 +4116,8 @@ class Janela(tk.Tk):
             # ja sem fio -> usa na hora, sem o passo "escolha qual usar".
             # Pelo cabo continua pedindo o clique: abrir o sem fio e mais
             # pesado e so faz sentido quando ele quer.
-            if len(self._achados) == 1 and (
+            if len(self._achados) == 1 and \
+                    self._achados[0].estado == conexao.PRONTO and (
                     self._achados[0].sem_fio or
                     self.programa.conexao_preferida() == "cabo") and \
                     not self.programa.celular:

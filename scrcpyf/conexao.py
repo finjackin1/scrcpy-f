@@ -234,6 +234,7 @@ def parear_por_codigo(adb, endereco: str, codigo: str, avisar,
         return Resultado(False, "O código de pareamento tem 6 números.")
 
     celular._rodar([adb, "start-server"], espera=15)
+    antes = {s for s, e in _seriais(adb) if e == "device"}
     avisar("Pareando com %s..." % endereco)
     saida = celular._rodar([adb, "pair", endereco, codigo], espera=20)
     if "success" not in saida.lower():
@@ -245,16 +246,31 @@ def parear_por_codigo(adb, endereco: str, codigo: str, avisar,
     ip = endereco.split(":")[0]
     avisar("Pareado. Esperando o celular aparecer sem fio...")
     inicio = time.monotonic()
+    vez = 0
     while time.monotonic() - inicio < ESPERA_DEPOIS_DE_PAREAR_S:
         if parar.is_set():
             return Resultado(False, "Cancelado.")
+        # (01/out) E ESTE celular: um sem fio novo na lista, ou o do mesmo
+        # IP (antes valia qualquer sem fio -- com outro ja conectado, pegava
+        # o outro).
         for s, estado in _seriais(adb):
-            if estado == "device" and not _pelo_cabo(s):
+            if estado != "device" or _pelo_cabo(s):
+                continue
+            mesmo_ip = s.split(":")[0] == ip
+            if s not in antes or mesmo_ip:
                 modelo = _modelo(adb, s) or "celular"
                 ip_rede = celular.endereco_na_rede(adb, s) or ip
                 return Resultado(True, "Pronto: %s conectado sem fio (%s)."
                                  % (modelo, ip_rede), modelo=modelo,
-                                 endereco=ip_rede)
+                                 endereco=ip_rede, serial=s)
+        # A descoberta automatica as vezes demora: liga direto no endereco
+        # que o celular anuncia (a cada ~3 s).
+        vez += 1
+        if vez % 3 == 1:
+            for _nome, servico, anunciado in anuncios(adb):
+                if servico.startswith("_adb-tls-connect") and \
+                        anunciado.split(":")[0] == ip:
+                    celular._rodar([adb, "connect", anunciado], espera=6)
         time.sleep(1.0)
     # Pareado mas a descoberta automatica nao achou: o programa acha depois
     # (ela as vezes demora), e o endereco fica de reserva.
@@ -269,13 +285,21 @@ def parear_por_codigo(adb, endereco: str, codigo: str, avisar,
 # de novo")
 # ---------------------------------------------------------------------------
 
+# (01/out) ESTADOS de um achado: "pronto" (o adb ja fala com ele), "permitir"
+# (no cabo, esperando o "Permitir depuracao USB" no celular) e "parear" (a
+# depuracao sem fio dele se anuncia na rede, mas ele nunca foi pareado com
+# este PC -- so o codigo resolve).
+PRONTO, PERMITIR, PAREAR = "pronto", "permitir", "parear"
+
+
 class Achado:
     def __init__(self, serial: str, modelo: str, sem_fio: bool,
-                 endereco: str) -> None:
+                 endereco: str, estado: str = PRONTO) -> None:
         self.serial = serial
         self.modelo = modelo or "Celular"
         self.sem_fio = sem_fio      # False = so pelo cabo, ainda
         self.endereco = endereco    # IP na rede, se souber
+        self.estado = estado
 
     @property
     def descricao(self) -> str:
@@ -283,6 +307,64 @@ class Achado:
             return "%s  ·  sem fio%s" % (
                 self.modelo, (" (%s)" % self.endereco) if self.endereco else "")
         return "%s  ·  pelo cabo" % self.modelo
+
+
+def _identidade(adb, serial: str) -> tuple[str, str]:
+    """(modelo, ro.serialno) numa pergunta so."""
+    saida = celular._rodar([adb, "-s", serial, "shell",
+                            "getprop ro.product.model; getprop ro.serialno"],
+                           espera=8)
+    linhas = [x.strip() for x in saida.replace("\r", "").split("\n")]
+    linhas = [x for x in linhas if x]
+    return (linhas[0] if linhas else ""), (linhas[1] if len(linhas) > 1 else "")
+
+
+def anuncios(adb) -> list[tuple[str, str, str]]:
+    """
+    (01/out) O que a depuracao sem fio dos celulares anuncia na rede (mDNS),
+    pelo `adb mdns services`: [(nome, servico, "ip:porta")]. O nome e
+    "adb-<ro.serialno>-<sufixo>"; servico "_adb-tls-connect._tcp" (depuracao
+    sem fio ligada) ou "_adb-tls-pairing._tcp" (tela "parear com codigo"
+    aberta no celular -- o ip:porta e o endereco do parear).
+    """
+    lista = []
+    for linha in celular._rodar([adb, "mdns", "services"],
+                                espera=8).replace("\r", "").split("\n"):
+        partes = [p.strip() for p in linha.split("\t")]
+        if len(partes) >= 3 and partes[1].startswith("_adb-tls-") and \
+                re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}:\d{2,5}", partes[2]):
+            lista.append((partes[0], partes[1].rstrip("."), partes[2]))
+    return lista
+
+
+def _serial_do_anuncio(nome: str) -> str:
+    m = re.match(r"adb-(.+)-[^-]+$", nome)
+    return m.group(1) if m else ""
+
+
+def endereco_de_parear(adb, ip: str = "") -> str:
+    """O "ip:porta" que a tela "parear com codigo" do celular anuncia (o do
+    `ip` primeiro, se dado); vazio se nenhuma esta aberta."""
+    abertos = [e for _n, s, e in anuncios(adb)
+               if s.startswith("_adb-tls-pairing")]
+    for endereco in abertos:
+        if endereco.split(":")[0] == ip:
+            return endereco
+    return abertos[0] if abertos else ""
+
+
+def nome_guardado(serialno: str) -> str:
+    """O modelo de um celular ja usado neste PC (guardado pelo programa em
+    dados\\celulares\\<id>\\modelo.txt), para dar nome a quem ainda nao
+    conectou."""
+    if not serialno:
+        return ""
+    try:
+        from . import caminhos
+        arquivo = caminhos.pasta_dados() / "celulares" / serialno / "modelo.txt"
+        return arquivo.read_text(encoding="utf-8").strip()[:40]
+    except Exception:
+        return ""
 
 
 def procurar(adb, ip_reserva: str, avisar,
@@ -309,19 +391,50 @@ def procurar(adb, ip_reserva: str, avisar,
             break
         time.sleep(1.5)
 
+    # (01/out) Quem se anuncia na rede mas o adb nao conhece: primeiro um
+    # `adb connect` (ja pareado e o adb ainda nao ligou sozinho = entra
+    # aqui); quem nao entrar e porque nunca foi pareado com este PC.
+    ligados = {s for s, e in vistos.items() if e == "device"}
+    ips_ligados = {s.split(":")[0] for s in ligados
+                   if ":" in s and "._tcp" not in s.lower()}
+    candidatos = []
+    for nome, servico, endereco in anuncios(adb):
+        if servico.startswith("_adb-tls-connect") and \
+                not any(s.startswith(nome) for s in ligados) and \
+                endereco.split(":")[0] not in ips_ligados:
+            candidatos.append((nome, endereco))
+    if candidatos:
+        avisar("Conferindo celulares na rede...")
+    for nome, endereco in candidatos:
+        if parar.is_set():
+            return Resultado(False, "Cancelado.")
+        celular._rodar([adb, "connect", endereco], espera=6)
+    if candidatos:
+        for s, estado in _seriais(adb):
+            vistos[s] = estado
+
     achados: list[Achado] = []
     por_modelo: dict[str, Achado] = {}
     autorizar = False
+    conhecidos: set[str] = set()     # ro.serialno de quem o adb ja fala
+    ips: set[str] = set()
     for serial, estado in vistos.items():
         if estado == "unauthorized":
             autorizar = True
+            if _pelo_cabo(serial):
+                achados.append(Achado(serial, nome_guardado(serial), False,
+                                      "", PERMITIR))
         if estado != "device":
             continue
         sem_fio = not _pelo_cabo(serial)
-        modelo = _modelo(adb, serial)
+        modelo, serialno = _identidade(adb, serial)
+        conhecidos.add(serialno or serial)
+        if not sem_fio:
+            conhecidos.add(serial)
         endereco = (serial.split(":")[0]
                     if sem_fio and "._tcp" not in serial.lower()
                     else _endereco_por_wlan(adb, serial))
+        ips.add(endereco)
         achado = Achado(serial, modelo, sem_fio, endereco)
         # O mesmo celular pode aparecer duas vezes (cabo E sem fio): fica a
         # entrada da conexao PREFERIDA (r192), que e a que o programa usa.
@@ -334,6 +447,18 @@ def procurar(adb, ip_reserva: str, avisar,
             continue
         por_modelo[achado.modelo] = achado
         achados.append(achado)
+
+    # Os que seguem so anunciados: precisam do codigo de pareamento.
+    vistos_pareando = set()
+    for nome, endereco in candidatos:
+        serialno = _serial_do_anuncio(nome)
+        ip = endereco.split(":")[0]
+        if (serialno and serialno in conhecidos) or ip in ips or \
+                (serialno or ip) in vistos_pareando:
+            continue
+        vistos_pareando.add(serialno or ip)
+        achados.append(Achado(nome, nome_guardado(serialno), True, ip,
+                              PAREAR))
 
     if achados:
         texto = ("Achei %d celular%s. Escolha qual usar."

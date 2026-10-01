@@ -2103,6 +2103,22 @@ class Programa:
             pass
         return pasta
 
+    @staticmethod
+    def _guardar_modelo(ident: str, modelo: str) -> None:
+        """(01/out) O nome do celular, para a lista do parear mostrar quem
+        ainda nao conectou (`conexao.nome_guardado`)."""
+        if not ident or not modelo:
+            return
+        try:
+            pasta = caminhos.pasta_dados() / "celulares" / ident
+            pasta.mkdir(parents=True, exist_ok=True)
+            arquivo = pasta / "modelo.txt"
+            if not arquivo.exists() or \
+                    arquivo.read_text(encoding="utf-8").strip() != modelo:
+                arquivo.write_text(modelo, encoding="utf-8")
+        except Exception:
+            pass
+
     def _guardar_lista(self, apps) -> None:
         """Poe a lista no cache do celular, mantendo a assinatura."""
         import json
@@ -4378,6 +4394,7 @@ class Programa:
             ident = self.celular.get("id")
             if ident and ident != getattr(self, "_cel_preparado", None):
                 self._cel_preparado = ident
+                self._guardar_modelo(ident, self.celular.get("modelo", ""))
                 threading.Thread(target=self._preparar_celular,
                                  args=(self.celular.get("serial", ""), ident),
                                  daemon=True, name="preparar").start()
