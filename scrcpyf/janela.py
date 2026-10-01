@@ -4305,11 +4305,16 @@ class Janela(tk.Tk):
             return
         self._notif_pintada = chave
         rol.limpar(manter=True)
+        # (01/out, teste dele: "limpar tudo nao funciona" -- eram todas
+        # FIXAS, que nem o "limpar tudo" do celular tira, e o link seguia com
+        # cara de clicavel.) Sem nada que se possa tirar, o link some.
         lim = self._ui.get("notif_limpar")
+        tem = any(n.limpavel for n in lista)
         if lim is not None:
-            tem = any(n.limpavel for n in lista)
-            lim.configure(fg=E.TEXTO_2 if tem else E.LINHA_FORTE,
-                          cursor="hand2" if tem else "arrow")
+            if tem and not lim.winfo_manager():
+                lim.pack(side="right")
+            elif not tem and lim.winfo_manager():
+                lim.pack_forget()
         if self._sem_celular_notif(rol):
             return
         d = rol.dentro
@@ -4321,6 +4326,11 @@ class Janela(tk.Tk):
                 if ocultas else ""), cor=E.APAGADO, largura=E.px(440)).pack(
                 side="top", fill="x")
             return
+        if not tem:
+            E.Texto(d, "estas são fixas (música, alarme, carregando...): só "
+                       "o próprio app tira, como no celular.",
+                    cor=E.APAGADO, largura=E.px(480)).pack(
+                side="top", fill="x", pady=(E.px(0), E.px(6)))
         grupos: dict = {}
         for n in lista:
             grupos.setdefault(n.app, []).append(n)
@@ -4336,10 +4346,9 @@ class Janela(tk.Tk):
                  if len(ns) > 1 else nome.upper(), bg=E.FUNDO, fg=E.TEXTO_2,
                  font=E.fonte(E.ROTULO), anchor="w").pack(
             side="left", fill="x", expand=True, padx=(E.px(6), E.px(0)))
-        limpaveis = [n.chave for n in ns if n.limpavel]
-        if len(limpaveis) > 1:
-            self._link(cab, "limpar", lambda k=limpaveis: self._remover_notif(
-                k)).pack(side="right")
+        if sum(1 for n in ns if n.limpavel) > 1:
+            self._link(cab, "limpar", lambda a=app: self._limpar_notif(
+                a)).pack(side="right")
         abre = self._app_abre(app)
         largura = max(E.px(200), (self._ui["rolagem_notif"].canvas.winfo_width()
                                   or E.px(560)) - E.px(40))
@@ -4512,9 +4521,10 @@ class Janela(tk.Tk):
             chaves, avisar=lambda t: self._da_outra_thread.put(
                 lambda: self.programa.anotar("notificacoes: %s" % t)))
 
-    def _limpar_notif(self) -> None:
-        chaves = [n.chave for n in self.programa.notif.visiveis()
-                  if n.limpavel]
+    def _limpar_notif(self, app: str = "") -> None:
+        chaves = self.programa.notif.para_limpar(app)
+        self.programa.anotar("notificacoes: limpar %s (%d)" % (
+            app or "tudo", len(chaves)))
         if chaves:
             self._remover_notif(chaves)
 

@@ -482,6 +482,15 @@ class Central:
         lista.sort(key=lambda n: n.quando, reverse=True)
         return lista
 
+    def para_limpar(self, app: str = "") -> list[str]:
+        """As chaves do "limpar tudo" (ou do "limpar" de um app): as
+        limpaveis de apps ligados -- INCLUSIVE o resumo do grupo, que fica
+        escondido enquanto ha filhas (sem ele, sobrava sozinho na lista)."""
+        with self._trava:
+            todas = list(self.ativas.values())
+        return [n.chave for n in todas if n.limpavel and self.ligada(n.app)
+                and (not app or n.app == app)]
+
     def contagem(self) -> int:
         """O numero do contador: as visiveis que nao sao fixas."""
         return sum(1 for n in self.visiveis() if not n.fixa)
