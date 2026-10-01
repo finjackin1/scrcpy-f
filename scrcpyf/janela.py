@@ -118,7 +118,7 @@ AJUSTES_SEM_REABRIR = ("ao_fechar",)
 AO_FECHAR = [("fechar", "fechar o app"), ("deixar", "deixar aberto")]
 # Telas que ficam guardadas (escondidas) ao sair e voltam prontas (r115/116).
 TELAS_GUARDADAS = ("_tela_apps_lista", "_tela_opcoes_qualidade",
-                   "_tela_opcoes_atalhos")
+                   "_tela_opcoes_atalhos", "_tela_notif_ajustes")
 
 PRECISA = {"som": (30, "11"), "pc_cel": (33, "13"), "apps": (29, "10")}
 
@@ -452,7 +452,8 @@ class Janela(tk.Tk):
             self.after(400, lambda: self._pre_montar(geracao, tentativa))
             return
         tela = faltam[0]
-        precisa_apps = tela in ("_tela_apps_lista", "_tela_opcoes_atalhos")
+        precisa_apps = tela in ("_tela_apps_lista", "_tela_opcoes_atalhos",
+                                "_tela_notif_ajustes")
         ocupado = (self._grande or getattr(self, "_veu", None) is not None
                    or getattr(self, "_lotes_de", None)
                    or self._gravando is not None
@@ -751,8 +752,18 @@ class Janela(tk.Tk):
                     # Largura de agora antes de conferir (a grade depende).
                     palco.update_idletasks()
                     self._pintar_lista_apps()  # so o que mudou enquanto fora
+                elif tela == "_tela_notif_ajustes":
+                    # (01/out) A busca nao fica entre visitas (como as outras
+                    # caixas); o resto so muda no lugar.
+                    b = self._ui.get("busca_notif")
+                    if b is not None and b.get():
+                        b.delete(0, "end")
+                    self._busca_notif = ""
+                    self._pintar_notif()
             else:
                 getattr(self, tela)(palco)
+            if tela == "_tela_notif_ajustes":
+                self.programa.notif.reler_bloqueados()
             if self._item == "apps" and self._falta("apps"):
                 self._cortina(palco, "apps", "apps em janela")
         except Exception:
@@ -4263,15 +4274,13 @@ class Janela(tk.Tk):
         self._lista_notif(dir_)
         self._notif_pintada = None
         self._pintar_notif()
-        self.programa.notif.reler_bloqueados()
         if self._apps is None and not self._apps_carregando:
             self._carregar_apps()
 
     def _buscou_notif(self) -> None:
         b = self._ui.get("busca_notif")
         self._busca_notif = b.get() if b is not None else ""
-        self._notif_pintada = None
-        self._pintar_notif()
+        self._filtrar_notif()               # no lugar, sem remontar
 
     def _pintar_notif(self) -> None:
         aba = self._aba.get("notif")
@@ -4457,63 +4466,128 @@ class Janela(tk.Tk):
         return sorted(vistos.items(), key=lambda x: x[1].lower())
 
     def _pintar_notif_ajustes(self, rol) -> None:
+        """
+        LEVE (01/out, "a aba ajustes esta muito pesada"): as linhas sao
+        montadas UMA vez por lista de apps (em lotes, como a de APPS) e a
+        tela fica guardada (TELAS_GUARDADAS). Chave virada, geral, marca de
+        "desligada no celular" e busca mudam NO LUGAR -- antes cada uma
+        refazia as ~80 linhas.
+        """
         c = self.programa.notif
         apps = self._apps_para_notif()
-        termo = getattr(self, "_busca_notif", "").strip().lower()
-        if termo:
-            apps = [(a, n) for a, n in apps
-                    if termo in n.lower() or termo in a.lower()]
-        excecoes = dict(self._config.apps.get("notif") or {})
-        chave = ("ajustes", tuple(a for a, _n in apps), repr(excecoes),
-                 self._config.opcao("notif_pc"), frozenset(c.bloqueados),
-                 self._icones_versao)
-        if chave == self._notif_pintada:
-            return
-        self._notif_pintada = chave
-        rol.limpar(manter=True)
+        chave = ("ajustes", tuple(apps), self._icones_versao)
+        if chave != self._notif_pintada:
+            self._notif_pintada = chave
+            self._acertar_linhas_notif(rol, apps)
+        linhas = self._ui.get("notif_linhas") or {}
+        bloq = c.bloqueados
+        for app, (_linha, chave_w, marca, _ic) in linhas.items():
+            ligada = c.ligada(app)
+            if chave_w._ligado != ligada:
+                chave_w.definir(ligada)
+            bloqueado = app in bloq
+            if bloqueado != bool(marca.winfo_manager()):
+                if bloqueado:
+                    marca.pack(side="top", fill="x")
+                else:
+                    marca.pack_forget()
+        self._filtrar_notif()
+
+    def _acertar_linhas_notif(self, rol, apps) -> None:
+        """
+        As linhas que JA existem ficam (destruir ~80 custava ~250 ms): app
+        novo ganha linha (em lotes), app que saiu perde a dele, icones que
+        chegaram trocam so o icone. A ordem vem do `_filtrar_notif`.
+        """
         d = rol.dentro
-        if not apps:
-            E.Texto(d, "nenhum app encontrado." if termo else
-                    "a lista de apps chega quando o celular conectar.",
-                    cor=E.APAGADO).pack(side="top", fill="x")
-            return
+        linhas: dict = self._ui.setdefault("notif_linhas", {})
+        nomes = {a: n for a, n in apps}
+        self._ui["notif_ordem"] = [a for a, _n in apps]
+        self._ui["notif_nomes"] = {a: n.lower() for a, n in apps}
+        if self._ui.get("notif_vazio") is None:
+            self._ui["notif_vazio"] = E.Texto(
+                d, "a lista de apps chega quando o celular conectar.",
+                cor=E.APAGADO)
+        for app in [a for a in linhas if a not in nomes]:
+            linhas.pop(app)[0].destroy()
+        versao = self._icones_versao
+        if self._ui.get("notif_icones") != versao:
+            self._ui["notif_icones"] = versao
+            for app, (linha, chave_w, marca, ic) in list(linhas.items()):
+                novo = self._icone_app(linha, app, nomes[app], E.px(16))
+                novo.pack(side="left", padx=(E.px(0), E.px(6)), before=ic)
+                ic.destroy()
+                linhas[app] = (linha, chave_w, marca, novo)
+        c = self.programa.notif
 
         def fazer(item):
             app, nome = item
+            if app in linhas:
+                return
             linha = tk.Frame(d, bg=E.FUNDO)
-            linha.pack(side="top", fill="x")
-            self._icone_app(linha, app, nome, E.px(16)).pack(
-                side="left", padx=(E.px(0), E.px(6)))
+            ic = self._icone_app(linha, app, nome, E.px(16))
+            ic.pack(side="left", padx=(E.px(0), E.px(6)))
             textos = tk.Frame(linha, bg=E.FUNDO)
             textos.pack(side="left", fill="x", expand=True, pady=E.px(3))
             tk.Label(textos, text=_encurtar(nome, 26).upper(), bg=E.FUNDO,
                      fg=E.TEXTO, font=E.fonte(E.ROTULO), anchor="w").pack(
                 side="top", fill="x")
+            marca = tk.Label(textos, text="desligada no celular",
+                             bg=E.FUNDO, fg=E.ALERTA,
+                             font=E.fonte(E.ROTULO - 1), anchor="w")
             if app in c.bloqueados:
-                tk.Label(textos, text="desligada no celular",
-                         bg=E.FUNDO, fg=E.ALERTA, font=E.fonte(E.ROTULO - 1),
-                         anchor="w").pack(side="top", fill="x")
-            E.Chave(linha, c.ligada(app),
-                    lambda v, a=app: self._virar_notif_app(a, v)).pack(
-                side="right")
+                marca.pack(side="top", fill="x")
+            chave_w = E.Chave(linha, c.ligada(app),
+                              lambda v, a=app: self._virar_notif_app(a, v))
+            chave_w.pack(side="right")
+            linhas[app] = (linha, chave_w, marca, ic)
 
-        self._em_lotes(d, apps, fazer, primeiro=14, lote=16)
+        novos = [x for x in apps if x[0] not in linhas]
+        self._em_lotes(d, novos, fazer, primeiro=14, lote=16,
+                       ao_fim=self._filtrar_notif)
+        self._filtrar_notif()
+
+    def _combina_notif(self, app: str) -> bool:
+        termo = getattr(self, "_busca_notif", "").strip().lower()
+        return not termo or termo in app.lower() or \
+            termo in (self._ui.get("notif_nomes") or {}).get(app, "")
+
+    def _filtrar_notif(self) -> None:
+        """A busca so mostra/esconde as linhas ja montadas, na ordem."""
+        rol = self._ui.get("rolagem_notif")
+        if rol is None or not rol.canvas.winfo_exists():
+            return
+        linhas = self._ui.get("notif_linhas") or {}
+        ordem = self._ui.get("notif_ordem") or []
+        vazio = self._ui.get("notif_vazio")
+        querido = [linhas[a][0] for a in ordem
+                   if a in linhas and self._combina_notif(a)]
+        if not querido and vazio is not None and \
+                len(linhas) >= len(ordem):
+            vazio.configure(text="nenhum app encontrado." if ordem else
+                            "a lista de apps chega quando o celular "
+                            "conectar.")
+            querido = [vazio]
+        atual = rol.dentro.pack_slaves()
+        if atual == querido:
+            return
+        for w in atual:
+            w.pack_forget()
+        for w in querido:
+            w.pack(side="top", fill="x")
 
     def _virar_notif_geral(self, ligado: bool) -> None:
         self._conferir_gravacao(self._config.definir_notif_geral(ligado))
         self.programa.anotar("notificacoes no pc: geral %s (excecoes zeradas)"
                              % ("ligada" if ligado else "desligada"))
-        self._notif_pintada = None
-        self._pintar_notif()
-        self.programa._avisar_mudanca()
+        self.programa._avisar_mudanca()     # as chaves viram no lugar
 
     def _virar_notif_app(self, app: str, ligado: bool) -> None:
         self._conferir_gravacao(self._config.definir_notif_app(app, ligado))
         self.programa.anotar("notificacoes no pc: %s %s" % (
             app, "ligada" if ligado else "desligada"))
-        self._notif_pintada = None
-        if self._item == "notif":
-            self._pintar_notif()
+        if self._aba.get("notif") != "ajustes":
+            self._notif_pintada = None      # a lista muda de verdade
         self.programa._avisar_mudanca()
 
     def _remover_notif(self, chaves) -> None:
