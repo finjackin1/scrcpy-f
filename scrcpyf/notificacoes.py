@@ -44,7 +44,7 @@ SEM_JANELA = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 MARCA = "scrcpyf_notif"
 # Mata no celular as conversas desta parte (as de agora e sobras). Os
 # colchetes fazem o proprio pkill nao casar com o padrao.
-MATAR = "pkill -f 'scrcpyf_noti[f]' ; true"
+MATAR = ("pkill -f 'scrcpyf_noti[f]' ; pkill -f 'scrcpyf.Midi[a]' ; true")
 JAR_NO_CELULAR = "/data/local/tmp/scrcpyf-notif.jar"
 HISTORICO_HORAS = 24
 HISTORICO_MAX = 500
@@ -60,6 +60,7 @@ SERVIDOR = (
     "g(){ cmd notification get \"$1\" </dev/null | sed -n "
     "-e '/^NotificationRecord(/p' -e '/^  uid=/p' "
     "-e '/^  flags=/p' -e '/^    when=/p' -e '/^    contentIntent=/p' "
+    "-e '/^    actions={/,/^      }/p' "
     "-e '/^    extras={/,/^    }/p'; }; "
     "while read c a; do case $c in "
     "l) cmd notification list </dev/null;; "
@@ -71,6 +72,8 @@ SERVIDOR = (
     # p: a tela de "configuracoes de notificacao" do proprio app, se tiver
     "p) cmd package query-activities --brief -a android.intent.action.MAIN "
     "-c android.intent.category.NOTIFICATION_PREFERENCES \"$a\" </dev/null;; "
+    # t: o estado da chamada (0 nada, 1 tocando, 2 em andamento)
+    "t) dumpsys telephony.registry </dev/null | grep -m1 mCallState;; "
     "esac; echo @fim; done" % MARCA)
 EVENTOS = ("logcat -b events -v epoch -T 1 -s notification_enqueue:I "
            "notification_cancel:I notification_cancel_all:I %s:S" % MARCA)
@@ -79,14 +82,18 @@ EVENTOS = ("logcat -b events -v epoch -T 1 -s notification_enqueue:I "
 FIXAS = {"ONGOING_EVENT", "FOREGROUND_SERVICE", "NO_CLEAR"}
 
 NOMES_DO_SISTEMA = {"android": "sistema android",
-                    "com.android.systemui": "interface do sistema"}
+                    "com.android.systemui": "interface do sistema",
+                    "com.samsung.android.incallui": "telefone",
+                    "com.android.incallui": "telefone",
+                    "com.android.server.telecom": "telefone"}
 
 
 class Notif:
     """Uma notificacao ativa no celular."""
 
     __slots__ = ("chave", "pacote", "usuario", "quando", "titulo", "texto",
-                 "subtexto", "flags", "sdk", "alvo", "canal")
+                 "subtexto", "flags", "sdk", "alvo", "canal", "acoes",
+                 "categoria", "modelo")
 
     def __init__(self, chave: str, pacote: str, usuario: int, quando: int,
                  titulo: str, texto: str, subtexto: str, flags: set) -> None:
@@ -104,6 +111,11 @@ class Notif:
         # do clique (`Central.destino`). None = a notificacao nao abre nada.
         self.alvo = None
         self.canal = ""                   # a categoria (canal) do Android
+        # Os botoes: [(rotulo, (id, pacote, tipo))] -- so os de tipo
+        # startActivity viram botao no PC (os outros so o celular aciona).
+        self.acoes: list = []
+        self.categoria = ""               # "msg", "call", "transport"...
+        self.modelo = ""                  # MediaStyle, MessagingStyle...
 
     @property
     def app(self) -> str:
@@ -162,6 +174,8 @@ def ler_detalhe(chave: str, texto: str) -> Notif | None:
     quando = 0
     alvo = None
     canal = ""
+    categoria = ""
+    acoes: list = []
     flags: set = set()
     extras: dict = {}
     atual = None
@@ -199,10 +213,18 @@ def ler_detalhe(chave: str, texto: str) -> Notif | None:
         if m:
             alvo = (m.group(1), m.group(2), m.group(3))
             continue
+        m = re.match(r'^\s+\[\d+\] "(.*)" -> PendingIntent\{\w+: '
+                     r'PendingIntentRecord\{(\w+) (\S+) (\w+)', linha)
+        if m:
+            acoes.append((m.group(1), (m.group(2), m.group(3), m.group(4))))
+            continue
         if linha.startswith("NotificationRecord("):
             m = re.search(r"Notification\(channel=([^ )]+)", linha)
             if m and m.group(1) != "null":
                 canal = m.group(1)
+            m = re.search(r" category=(\w+)", linha)
+            if m:
+                categoria = m.group(1)
     if not extras and not flags and not quando:
         return None
     titulo = _valor(extras.get("android.title", "")) or \
@@ -214,7 +236,38 @@ def ler_detalhe(chave: str, texto: str) -> Notif | None:
               flags)
     n.alvo = alvo
     n.canal = canal
+    n.acoes = acoes
+    n.categoria = categoria
+    n.modelo = _valor(extras.get("android.template", "")).rsplit("$", 1)[-1]
     return n
+
+
+# (01/out) CODIGO DE VERIFICACAO: 4 a 8 digitos (com hifen/espaco no meio)
+# numa notificacao que fala em codigo. O botao "copiar codigo" copia SO os
+# digitos.
+_PALAVRAS_CODIGO = re.compile(
+    r"c[oó]digo|code|verifica|senha|\bpin\b|\botp\b|token|autentica"
+    r"|confirma[cç][aã]o", re.I)
+_CODIGO = re.compile(r"(?<![\d\w])(\d{3,4}[- ]?\d{2,4}|\d{4,8})(?![\d\w])")
+
+
+def codigo_de(n) -> str:
+    """O codigo de verificacao da notificacao, ou ""."""
+    texto = "%s %s" % (n.titulo, n.texto)
+    if not _PALAVRAS_CODIGO.search(texto):
+        return ""
+    for m in _CODIGO.finditer(texto):
+        digitos = re.sub(r"\D", "", m.group(1))
+        if 4 <= len(digitos) <= 8:
+            return digitos
+    return ""
+
+
+def botoes_de_tela(n) -> list:
+    """Os botoes da notificacao que ABREM UMA TELA (startActivity) -- os
+    unicos que o PC consegue repetir sem app no celular."""
+    return [(rot, alvo) for rot, alvo in (n.acoes or [])
+            if alvo and alvo[2] == "startActivity"]
 
 
 def ler_destino(texto: str) -> dict:
@@ -397,6 +450,10 @@ class Central:
         self._a_remover: list = []        # chaves esperando o jar (em lote)
         self._removendo = False
         self._avisar_falha = None
+        self._midia_proc = None
+        self.midias: list = []            # fotos do player (ver _manter_midia)
+        self.midias_versao = 0
+        self.chamada = None               # Notif da chamada TOCANDO, ou None
 
     # -- vida -----------------------------------------------------------------
 
@@ -460,9 +517,18 @@ class Central:
             faxina.start()
             if esperar:
                 faxina.join(6)
+        midia, self._midia_proc = self._midia_proc, None
+        if midia is not None:
+            try:
+                midia.terminate()
+            except Exception:
+                pass
         with self._trava:
-            mudou = bool(self.ativas)
+            mudou = bool(self.ativas) or bool(self.midias) or \
+                self.chamada is not None
             self.ativas = {}
+            self.midias = []
+            self.chamada = None
             self._pronto = False
         if mudou:
             self._mudou()
@@ -507,7 +573,124 @@ class Central:
         self.anotar("notificacoes: no ar (%s)" % serial)
         threading.Thread(target=self._ler_eventos, args=(ev, geracao),
                          daemon=True, name="notif-eventos").start()
+        threading.Thread(target=self._manter_midia, args=(serial, geracao),
+                         daemon=True, name="notif-midia").start()
         self._trabalhar(geracao)
+
+    # -- o player (01/out) ----------------------------------------------------
+    # `android\Midia.java` de pe ("vigiar"): escreve a foto das sessoes de
+    # midia quando algo muda e obedece "c <pacote> <acao> [ms]". Caiu =
+    # sobe de novo (o player nao derruba as notificacoes).
+
+    def _por_jar(self, serial: str) -> bool:
+        if self._jar_pronto == serial:
+            return True
+        from pathlib import Path
+        jar = Path(caminhos.pasta_interna()) / "android" / "scrcpyf-notif.jar"
+        if not jar.exists():
+            return False
+        self._rodar([str(self._adb()), "-s", serial, "push", str(jar),
+                     JAR_NO_CELULAR], 20)
+        self._jar_pronto = serial
+        return True
+
+    def _manter_midia(self, serial: str, geracao: int) -> None:
+        falhas = 0
+        while geracao == self._geracao and falhas < 20:
+            if not self._por_jar(serial):
+                return
+            try:
+                proc = subprocess.Popen(
+                    [str(self._adb()), "-s", serial, "shell",
+                     "CLASSPATH=%s app_process / scrcpyf.Midia vigiar"
+                     % JAR_NO_CELULAR], stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    creationflags=SEM_JANELA)
+            except Exception as erro:
+                self.anotar("player: nao subiu (%s)" % erro)
+                return
+            self._midia_proc = proc
+            linhas: list = []
+            for bruta in proc.stdout:
+                if geracao != self._geracao:
+                    break
+                linha = bruta.decode("utf-8", errors="replace").rstrip("\r\n")
+                if linha == "vigia ok":
+                    if falhas == 0:
+                        self.anotar("player: no ar")
+                elif linha.startswith("M\t"):
+                    linhas.append(linha)
+                elif linha == "fim":
+                    self._chegou_foto_midia(linhas)
+                    linhas = []
+                elif linha.startswith("erro"):
+                    self.anotar("player: %s" % linha[:200])
+            if geracao != self._geracao:
+                break
+            falhas += 1
+            self._jar_pronto = ""            # o jar pode ter saido do celular
+            if falhas in (1, 5):
+                self.anotar("player: caiu; subindo de novo (%dx)" % falhas)
+            time.sleep(3)
+
+    def _chegou_foto_midia(self, linhas: list) -> None:
+        agora = time.monotonic()
+        midias = []
+        for linha in linhas:
+            p = [c.replace("\\t", "\t").replace("\\n", " ").replace("\\\\", "\\")
+                 for c in linha.split("\t")]
+            if len(p) < 10:
+                continue
+            try:
+                midias.append({
+                    "pacote": p[1], "estado": int(p[2]), "pos": int(p[3]),
+                    "dur": int(p[4]), "vel": float(p[5]), "acoes": int(p[6]),
+                    "titulo": p[7], "artista": p[8], "album": p[9],
+                    "recebido": agora})
+            except ValueError:
+                continue
+        with self._trava:
+            def sem_pos(lista):
+                return [(m["pacote"], m["estado"], m["dur"], m["titulo"],
+                         m["artista"]) for m in lista]
+            mudou = sem_pos(midias) != sem_pos(self.midias)
+            self.midias = midias
+            self.midias_versao += 1          # a posicao (barra) se acerta
+        if mudou:
+            self._mudou()
+
+    def player(self) -> dict | None:
+        """A sessao a mostrar: a que esta tocando; senao a pausada mais
+        recente com musica. None = nada."""
+        with self._trava:
+            lista = list(self.midias)
+        for m in lista:
+            if m["estado"] == 3 and (m["titulo"] or m["dur"]):
+                return m
+        for m in lista:
+            if m["estado"] in (2, 6, 8) and m["titulo"]:
+                return m
+        return None
+
+    def posicao(self, m: dict) -> int:
+        """A posicao AGORA (anda sozinha no PC enquanto toca)."""
+        pos = m["pos"]
+        if m["estado"] == 3:
+            pos += int((time.monotonic() - m["recebido"]) * 1000 * m["vel"])
+        return max(0, min(pos, m["dur"])) if m["dur"] else max(0, pos)
+
+    def midia_comando(self, pacote: str, acao: str, ms: int = 0) -> None:
+        proc = self._midia_proc
+        if proc is None or proc.poll() is not None:
+            self.anotar("player: %s sem o programinha no ar" % acao)
+            return
+        linha = "c %s %s%s\n" % (pacote, acao,
+                                 (" %d" % ms) if acao == "seek" else "")
+        try:
+            proc.stdin.write(linha.encode())
+            proc.stdin.flush()
+        except Exception as erro:
+            self.anotar("player: %s falhou (%s)" % (acao, erro))
 
     # -- conversa -------------------------------------------------------------
 
@@ -691,7 +874,9 @@ class Central:
         for n in chegaram:
             if not n.fixa and not n.resumo:
                 self._guardar_no_historico(n)
+                # A chamada tem aviso proprio (ver `chamada`).
                 if not primeira and self.ligada(n.app) and \
+                        n.categoria != "call" and \
                         (self.pode_avisar is None or self.pode_avisar(n.app)):
                     self._avisos.put(n)
         for n in sairam:
@@ -710,8 +895,31 @@ class Central:
             self.anotar("notificacoes: %d no celular (+%d -%d)%s%s"
                         % (len(novas), len(chegaram), len(sairam),
                            " [1a leitura]" if primeira else "", medida))
+        self._conferir_chamada(novas, chegaram, sairam)
         self._mudou()
         self._conferir_prefs({n.pacote for n in novas.values()})
+
+    def _conferir_chamada(self, novas: dict, chegaram: list,
+                          sairam: list) -> None:
+        """(01/out) CHAMADA TOCANDO: notificacao de categoria "call" e o
+        telefone em "tocando" (mCallState=1). Conferido so quando uma de
+        chamada chega, muda ou sai (atender/recusar mudam a notificacao)."""
+        mexeu = [n for n in chegaram + sairam if n.categoria == "call"]
+        if not mexeu:
+            return
+        chamadas = [n for n in novas.values() if n.categoria == "call"]
+        tocando = None
+        if chamadas:
+            resposta = self._pedir("t", espera=6) or []
+            m = re.search(r"mCallState=(\d)", " ".join(resposta))
+            if m and m.group(1) == "1":
+                tocando = chamadas[0]
+        with self._trava:
+            antes, self.chamada = self.chamada, tocando
+        if (antes is None) != (tocando is None):
+            self.anotar("notificacoes: chamada %s" % (
+                "TOCANDO (%s)" % tocando.titulo[:40] if tocando
+                else "acabou/atendida"))
 
     def _conferir_prefs(self, pacotes) -> None:
         """A tela de configuracoes de notificacao propria de cada app (uma

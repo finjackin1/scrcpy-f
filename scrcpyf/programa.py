@@ -978,6 +978,45 @@ class Programa:
         if abre:
             self.pedidos.put(("app", app, self._nome_do_app(app)))
 
+    # (01/out) CHAMADA: o `cmd telecom` nao tem "atender"; o que o Android
+    # aceita do shell e a tecla de telefone (KEYCODE_CALL / ENDCALL, que o
+    # sistema trata com o telefone tocando) e, de reserva, o botao do fone
+    # (`cmd media_session dispatch headsethook` -- a sessao do telecom e a
+    # de prioridade global). Atender pelo PC atende NO CELULAR.
+
+    def _estado_chamada(self, serial: str) -> str:
+        import re
+        r = self._shell(serial, "dumpsys telephony.registry | grep -m1 "
+                        "mCallState", espera=6)
+        m = re.search(r"mCallState=(\d)", r)
+        return m.group(1) if m else "?"
+
+    def atender_chamada(self) -> None:
+        self._acao_chamada("atender", ["input keyevent KEYCODE_CALL",
+                                       "cmd media_session dispatch headsethook"])
+
+    def recusar_chamada(self) -> None:
+        self._acao_chamada("recusar", ["input keyevent KEYCODE_ENDCALL"])
+
+    def _acao_chamada(self, nome: str, jeitos: list) -> None:
+        def trabalho():
+            serial = self._em_uso_pronto()
+            if not serial:
+                self.anotar("chamada: %s sem celular" % nome)
+                return
+            for jeito in jeitos:
+                self._shell(serial, jeito, espera=6)
+                time.sleep(1.0)
+                estado = self._estado_chamada(serial)
+                self.anotar("chamada: %s por '%s' -> estado %s" % (
+                    nome, jeito, estado))
+                if estado != "1":            # saiu de "tocando": serviu
+                    return
+            self.anotar("chamada: %s NAO funcionou (segue tocando)" % nome)
+
+        threading.Thread(target=trabalho, daemon=True,
+                         name="chamada-%s" % nome).start()
+
     def abrir_tela(self, janela: str, args: list) -> None:
         """(01/out) Uma tela do celular (do menu da notificacao: as
         configuracoes do app, da categoria...) na janela do app `janela`."""

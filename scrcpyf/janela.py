@@ -39,6 +39,7 @@ from . import (VERSAO, atalhos as atalhos_mod, conexao, inicio_windows,
                formatos, moldura, monitores as mon, qualidade, sistema)
 from . import estudio as E
 from .programa import APP, DEX, conteudo_do
+from .notificacoes import botoes_de_tela as nt_botoes, codigo_de as nt_codigo
 
 log = logging.getLogger(__name__)
 
@@ -4398,11 +4399,22 @@ class Janela(tk.Tk):
         c = self.programa.notif
         lista = c.visiveis()
         cel = bool((self.programa.celular or {}).get("serial"))
+        # (01/out) O PLAYER no topo, como no celular; o cartao de midia do
+        # mesmo app (e o "MediaOngoingActivity" do Samsung) sai da lista.
+        jogador = c.player() if cel else None
+        if jogador is not None:
+            lista = [n for n in lista if not (
+                (n.modelo == "MediaStyle" and n.pacote == jogador["pacote"])
+                or (n.pacote == "com.android.systemui"
+                    and n.canal == "MediaOngoingActivity"))]
         tem = any(n.limpavel for n in lista)
         assin = (cel, tuple((n.chave, n.conteudo(), n.limpavel, n.quando)
                             for n in lista), self._icones_versao,
                  frozenset(self._config.apps.get("notif") or {}),
-                 self._config.opcao("notif_pc"))
+                 self._config.opcao("notif_pc"),
+                 None if jogador is None else (
+                     jogador["pacote"], jogador["estado"], jogador["titulo"],
+                     jogador["artista"], jogador["dur"], jogador["acoes"]))
         if assin == self._ui.get("notif_pintada"):
             return
         self._ui["notif_pintada"] = assin
@@ -4423,8 +4435,12 @@ class Janela(tk.Tk):
                 cab[0].destroy()
             cabecas.clear()
         querido = []
+        if jogador is not None:
+            querido.append(self._acertar_player(d, jogador))
         if not cel:
             querido.append(self._msg_notif(d, "nenhum celular conectado."))
+        elif not lista and jogador is not None:
+            pass                              # so o player: sem mensagem
         elif not lista:
             ocultas = sum(1 for n in c.todas()
                           if not c.ligada(n.app) and not n.resumo)
@@ -4448,7 +4464,9 @@ class Janela(tk.Tk):
             vivas_cab.add(app)
             querido.append(cab[0])
             for n in ns:
-                assin_c = (n.conteudo(), n.limpavel)
+                assin_c = (n.conteudo(), n.limpavel,
+                           tuple(r for r, _a in nt_botoes(n)),
+                           nt_codigo(n))
                 cartao = cartoes.get(n.chave)
                 if cartao is not None and cartao[1] != assin_c:
                     cartao[0].destroy()
@@ -4525,6 +4543,28 @@ class Janela(tk.Tk):
                          wraplength=self._largura_texto_notif())
             t.pack(side="top", fill="x", padx=E.px(8))
             pecas.append(t)
+        # (01/out) Os botoes da notificacao que abrem uma tela e o "copiar
+        # codigo" (codigo de verificacao): uma fileira de links embaixo.
+        botoes = nt_botoes(n)
+        codigo = nt_codigo(n)
+        if botoes or codigo:
+            fila = tk.Frame(card, bg=E.FUNDO)
+            fila.pack(side="top", fill="x", padx=E.px(8), pady=(E.px(4), 0))
+            acoes = []
+            if codigo:
+                lc = self._link(fila, "copiar código %s" % codigo,
+                                lambda: None)
+                acoes.append((lc, lambda w=lc, cd=codigo:
+                              self._copiar_codigo(cd, w)))
+            for rotulo, alvo in botoes[:3]:
+                lb = self._link(fila, _encurtar(rotulo.lower(), 24),
+                                lambda: None)
+                acoes.append((lb, lambda a=alvo, ap=app:
+                              self.programa.abrir_pela_notificacao(ap, a)))
+            for w, acao in acoes:
+                for ev in ("<Button-1>", "<Return>", "<space>"):
+                    w.bind(ev, lambda _e, a=acao: (a(), "break")[1])
+                w.pack(side="left", padx=(0, E.px(12)))
         tk.Frame(card, bg=E.FUNDO, height=E.px(5)).pack(side="top")
         def menu(e, a=app, k=n.chave):
             # (01/out, teste dele: "botao direito nao faz nada") O clique
@@ -4544,7 +4584,225 @@ class Janela(tk.Tk):
                     highlightbackground=E.ACENTO), add="+")
                 w.bind("<Leave>", lambda _e: card.configure(
                     highlightbackground=E.LINHA), add="+")
-        return (card, (n.conteudo(), n.limpavel), hora)
+        return (card, (n.conteudo(), n.limpavel,
+                       tuple(r for r, _a in botoes), codigo), hora)
+
+    # -- o player (01/out/2026, pedido dele) --------------------------------
+    # Cartao no topo das notificacoes, como no celular: o app, a musica, a
+    # barra (anda sozinha no PC; clicar/arrastar pula, se o app deixa) e
+    # anterior / tocar-pausar / proxima. Vem do `Midia.java` no celular.
+
+    ACAO_PAUSAR, ACAO_TOCAR, ACAO_ANTERIOR, ACAO_PROXIMA = 2, 4, 16, 32
+    ACAO_PULAR, ACAO_TOCAR_PAUSAR = 256, 512
+
+    @staticmethod
+    def _mmss(ms) -> str:
+        s = max(0, int(ms or 0)) // 1000
+        return "%d:%02d" % (s // 60, s % 60) if s < 3600 else \
+            "%d:%02d:%02d" % (s // 3600, s // 60 % 60, s % 60)
+
+    def _botao_midia(self, pai, tipo: str, acao) -> tk.Canvas:
+        """Botao desenhado (a letra monoespacada nao tem esses simbolos):
+        "ant", "prox", "tocar", "pausar"."""
+        lado = E.px(30)
+        c = tk.Canvas(pai, width=lado, height=lado, bg=E.FUNDO,
+                      highlightthickness=1, highlightbackground=E.FUNDO,
+                      highlightcolor=E.ACENTO, cursor="hand2", takefocus=1)
+        c._tipo = tipo
+
+        def pintar(cor=None):
+            c.delete("all")
+            cor = cor or E.TEXTO
+            m, l = lado // 2, lado
+            if c._tipo == "tocar":
+                c.create_polygon(l * 0.36, l * 0.26, l * 0.36, l * 0.74,
+                                 l * 0.74, m, fill=cor, outline=cor)
+            elif c._tipo == "pausar":
+                for x in (0.34, 0.56):
+                    c.create_rectangle(l * x, l * 0.27, l * (x + 0.1),
+                                       l * 0.73, fill=cor, outline=cor)
+            else:
+                d = 1 if c._tipo == "prox" else -1
+                x0 = m - d * l * 0.16
+                c.create_polygon(x0, l * 0.3, x0, l * 0.7, m + d * l * 0.12, m,
+                                 fill=cor, outline=cor)
+                xb = m + d * l * 0.16
+                c.create_rectangle(xb - l * 0.03, l * 0.3, xb + l * 0.03,
+                                   l * 0.7, fill=cor, outline=cor)
+
+        c._pintar = pintar
+        pintar()
+        for ev in ("<Button-1>", "<Return>", "<space>"):
+            c.bind(ev, lambda _e: (acao(), "break")[1])
+        c.bind("<Enter>", lambda _e: pintar(E.ACENTO))
+        c.bind("<Leave>", lambda _e: pintar())
+        return c
+
+    def _acertar_player(self, d, m: dict):
+        """Monta o cartao (1x) e poe em dia com a sessao `m`, no lugar."""
+        pl = self._ui.get("player")
+        if pl is None or not pl["frame"].winfo_exists():
+            pl = self._montar_player(d)
+            self._ui["player"] = pl
+        app = m["pacote"]
+        if pl.get("icone_de") != (app, self._icones_versao):
+            pl["icone_de"] = (app, self._icones_versao)
+            if pl.get("icone") is not None:
+                pl["icone"].destroy()
+            pl["icone"] = self._icone_app(pl["topo"], app,
+                                          self._nome_notif(app), E.px(28))
+            pl["icone"].pack(side="left", anchor="n", before=pl["textos"])
+        titulo = _encurtar(m["titulo"] or self._nome_notif(app), 48)
+        sub = "  ·  ".join(x for x in (m["artista"], self._nome_notif(app))
+                           if x)
+        for chave, texto in (("titulo", titulo), ("artista", _encurtar(sub, 60))):
+            if pl[chave].cget("text") != texto:
+                pl[chave].configure(text=texto)
+        tocando = m["estado"] == 3
+        botao = pl["play"]
+        if botao._tipo != ("pausar" if tocando else "tocar"):
+            botao._tipo = "pausar" if tocando else "tocar"
+            botao._pintar()
+        pl["sessao"] = m
+        pl["pula"] = bool(m["acoes"] & self.ACAO_PULAR) and m["dur"] > 0
+        pl["barra"].configure(cursor="hand2" if pl["pula"] else "arrow")
+        self._pintar_barra_player()
+        return pl["frame"]
+
+    def _montar_player(self, d) -> dict:
+        f = tk.Frame(d, bg=E.FUNDO, highlightthickness=1,
+                     highlightbackground=E.LINHA)
+        f._pady = (E.px(0), E.px(8))
+        topo = tk.Frame(f, bg=E.FUNDO)
+        topo.pack(side="top", fill="x", padx=E.px(10), pady=(E.px(8), 0))
+        textos = tk.Frame(topo, bg=E.FUNDO)
+        textos.pack(side="left", fill="x", expand=True, padx=(E.px(10), 0))
+        titulo = tk.Label(textos, text="", bg=E.FUNDO, fg=E.TEXTO,
+                          font=E.fonte(E.PEQUENA, "bold"), anchor="w")
+        titulo.pack(side="top", fill="x")
+        artista = tk.Label(textos, text="", bg=E.FUNDO, fg=E.TEXTO_2,
+                           font=E.fonte(E.ROTULO), anchor="w")
+        artista.pack(side="top", fill="x")
+        linha = tk.Frame(f, bg=E.FUNDO)
+        linha.pack(side="top", fill="x", padx=E.px(10), pady=(E.px(6), 0))
+        t0 = tk.Label(linha, text="0:00", bg=E.FUNDO, fg=E.APAGADO,
+                      font=E.fonte(E.ROTULO), width=7, anchor="w")
+        t0.pack(side="left")
+        t1 = tk.Label(linha, text="0:00", bg=E.FUNDO, fg=E.APAGADO,
+                      font=E.fonte(E.ROTULO), width=7, anchor="e")
+        t1.pack(side="right")
+        barra = tk.Canvas(linha, height=E.px(14), bg=E.FUNDO,
+                          highlightthickness=0)
+        barra.pack(side="left", fill="x", expand=True, padx=E.px(4))
+        botoes = tk.Frame(f, bg=E.FUNDO)
+        botoes.pack(side="top", pady=(E.px(2), E.px(6)))
+        pl = {"frame": f, "topo": topo, "textos": textos, "titulo": titulo,
+              "artista": artista, "t0": t0, "t1": t1, "barra": barra,
+              "icone": None, "arraste": None, "sessao": None, "pula": False}
+        for tipo, acao in (("ant", "previous"), ("tocar", "play-pause"),
+                           ("prox", "next")):
+            b = self._botao_midia(botoes, tipo,
+                                  lambda a=acao: self._comando_player(a))
+            b.pack(side="left", padx=E.px(6))
+            if tipo == "tocar":
+                pl["play"] = b
+        barra.bind("<Configure>", lambda _e: self._pintar_barra_player())
+        barra.bind("<Button-1>", lambda e: self._arrastar_player(e))
+        barra.bind("<B1-Motion>", lambda e: self._arrastar_player(e))
+        barra.bind("<ButtonRelease-1>", lambda e: self._soltar_player(e))
+        return pl
+
+    def _comando_player(self, acao: str) -> None:
+        pl = self._ui.get("player") or {}
+        m = pl.get("sessao")
+        if not m:
+            return
+        if acao == "play-pause":
+            acao = "pause" if m["estado"] == 3 else "play"
+            # Na hora, sem esperar o celular: o botao e a barra respondem.
+            m["pos"] = self.programa.notif.posicao(m)
+            m["recebido"] = time.monotonic()
+            m["estado"] = 2 if acao == "pause" else 3
+            pl["play"]._tipo = "tocar" if acao == "pause" else "pausar"
+            pl["play"]._pintar(E.ACENTO)
+        self.programa.anotar("player: %s (%s)" % (acao, m["pacote"]))
+        self.programa.notif.midia_comando(m["pacote"], acao)
+
+    def _fracao_player(self, e) -> float:
+        largura = max(1, e.widget.winfo_width())
+        return min(1.0, max(0.0, e.x / largura))
+
+    def _arrastar_player(self, e) -> None:
+        pl = self._ui.get("player") or {}
+        if not pl.get("pula"):
+            return
+        pl["arraste"] = self._fracao_player(e)
+        self._pintar_barra_player()
+
+    def _soltar_player(self, e) -> None:
+        pl = self._ui.get("player") or {}
+        m = pl.get("sessao")
+        if not pl.get("pula") or not m or pl.get("arraste") is None:
+            return
+        ms = int(self._fracao_player(e) * m["dur"])
+        pl["arraste"] = None
+        m["pos"], m["recebido"] = ms, time.monotonic()     # na hora
+        self._pintar_barra_player()
+        self.programa.anotar("player: pular para %s" % self._mmss(ms))
+        self.programa.notif.midia_comando(m["pacote"], "seek", ms)
+
+    def _pintar_barra_player(self) -> None:
+        """A barra e os tempos (chamado pelo relogio da janela: so mexe no
+        canvas, sem remontar nada)."""
+        pl = self._ui.get("player")
+        if not pl or not pl["frame"].winfo_exists():
+            return
+        m = pl.get("sessao")
+        b = pl["barra"]
+        larg, alt = b.winfo_width(), b.winfo_height()
+        if not m or larg < 4:
+            return
+        dur = m["dur"]
+        pos = self.programa.notif.posicao(m)
+        frac = pl["arraste"] if pl.get("arraste") is not None else (
+            pos / dur if dur else 0.0)
+        x = int(frac * larg)
+        meio = alt // 2
+        if not b.find_withtag("trilho"):
+            b.create_line(0, meio, larg, meio, fill=E.LINHA_FORTE,
+                          width=E.px(2), tags="trilho")
+            b.create_line(0, meio, 0, meio, fill=E.ACENTO, width=E.px(2),
+                          tags="feito")
+            b.create_rectangle(0, 0, 0, 0, fill=E.TEXTO, outline=E.TEXTO,
+                               tags="pino")
+        b.coords("trilho", 0, meio, larg, meio)
+        b.coords("feito", 0, meio, x, meio)
+        r = E.px(4) if pl.get("pula") else 0
+        b.coords("pino", x - r, meio - r, x + r, meio + r)
+        b.itemconfigure("pino", state="normal" if r else "hidden")
+        mostrado = int(frac * dur) if pl.get("arraste") is not None else pos
+        for chave, texto in (("t0", self._mmss(mostrado)),
+                             ("t1", self._mmss(dur) if dur else "--:--")):
+            if pl[chave].cget("text") != texto:
+                pl[chave].configure(text=texto)
+
+    def _copiar_codigo(self, codigo: str, rotulo=None) -> None:
+        """(01/out) Codigo de verificacao -> area de transferencia."""
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(codigo)
+            self.update_idletasks()
+        except tk.TclError:
+            return
+        self.programa.anotar("notificacao: codigo copiado")
+        if rotulo is not None:
+            try:
+                antes = rotulo.cget("text")
+                rotulo.configure(text="copiado ✓")
+                rotulo.after(1500, lambda: rotulo.winfo_exists() and
+                             rotulo.configure(text=antes))
+            except tk.TclError:
+                pass
 
     def _pintar_notif_hist(self, rol) -> None:
         c = self.programa.notif
@@ -4783,18 +5041,49 @@ class Janela(tk.Tk):
             if agora - getattr(self, "_horas_em", 0.0) >= self.HORAS_A_CADA_S:
                 self._horas_em = agora
                 self._horas_notif()
+            if self._aba.get("notif") == "lista":
+                self._pintar_barra_player()      # a barra anda (so o canvas)
+        self._giro_chamada()
         novas = self.programa.notif.proximos_avisos()
         if not novas:
             return
+        self._criar_avisos()
+        for n in novas[-3:]:
+            botoes = []
+            codigo = nt_codigo(n)
+            if codigo:
+                botoes.append(("copiar código %s" % codigo,
+                               lambda cd=codigo: self._copiar_codigo(cd)))
+            for rotulo, alvo in nt_botoes(n)[:2]:
+                botoes.append((_encurtar(rotulo.lower(), 20),
+                               lambda a=alvo, ap=n.app:
+                               self.programa.abrir_pela_notificacao(ap, a)))
+            self._avisos.mostrar(n.app, self._nome_notif(n.app), n.titulo,
+                                 n.texto or n.subtexto,
+                                 self._quando_notif(n.quando), dado=n.chave,
+                                 botoes=botoes)
+
+    def _criar_avisos(self) -> None:
         if getattr(self, "_avisos", None) is None:
             from . import aviso_notif
             self._avisos = aviso_notif.Avisos(self, self._icone_app,
                                               self._clicou_aviso,
                                               self.programa.anotar)
-        for n in novas[-3:]:
-            self._avisos.mostrar(n.app, self._nome_notif(n.app), n.titulo,
-                                 n.texto or n.subtexto,
-                                 self._quando_notif(n.quando), dado=n.chave)
+
+    def _giro_chamada(self) -> None:
+        """(01/out) A chamada tocando: aviso proprio, ate ela acabar."""
+        n = self.programa.notif.chamada
+        chave = n.chave if n is not None else None
+        if chave == getattr(self, "_chamada_vista", None):
+            return
+        self._chamada_vista = chave
+        self._criar_avisos()
+        self._avisos.fechar_chamada()
+        if n is not None:
+            self._avisos.mostrar_chamada(
+                n.app, self._nome_notif(n.app), n.titulo or "chamada",
+                n.texto, self.programa.atender_chamada,
+                self.programa.recusar_chamada)
 
     def _clicou_aviso(self, app: str, chave: str = "") -> None:
         """Clique no aviso: o que o toque no celular abriria, numa janela do

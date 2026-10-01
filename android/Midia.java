@@ -29,6 +29,7 @@ public final class Midia {
 
     private static Object sGerente;
     private static final Object TRAVA = new Object();
+    private static volatile boolean sForcar;     // comando: foto ja
 
     public static void main(String[] args) throws Exception {
         String modo = args.length > 0 ? args[0] : "ler";
@@ -259,9 +260,44 @@ public final class Midia {
             if (p.length > 3) {
                 p[3] = "";
             }
-            b.append(String.join("\t", p)).append('\n');
+            for (int i = 0; i < p.length; i++) {
+                b.append(i == 0 ? "" : "\t").append(p[i]);
+            }
+            b.append('\n');
         }
         return b.toString();
+    }
+
+    /** Alguem pulou o trecho NO CELULAR? A posicao de agora fica longe da
+     *  esperada (a da ultima foto + o tempo passado). */
+    static boolean pulou(String antes, String agora, long passouMs) {
+        if (antes.isEmpty()) {
+            return false;
+        }
+        String[] a = antes.split("\n");
+        String[] b = agora.split("\n");
+        for (String la : a) {
+            String[] pa = la.split("\t", -1);
+            if (pa.length < 6 || !"M".equals(pa[0])) {
+                continue;
+            }
+            for (String lb : b) {
+                String[] pb = lb.split("\t", -1);
+                if (pb.length < 6 || !pb[1].equals(pa[1])) {
+                    continue;
+                }
+                try {
+                    float vel = Float.parseFloat(pa[5]);
+                    long esperada = Long.parseLong(pa[3]) + (long) (passouMs * vel);
+                    if (Math.abs(Long.parseLong(pb[3]) - esperada) > 1500) {
+                        return true;
+                    }
+                } catch (NumberFormatException e) {
+                    // linha estranha: ignora
+                }
+            }
+        }
+        return false;
     }
 
     static void comando(String linha) {
@@ -301,9 +337,11 @@ public final class Midia {
                             new InputStreamReader(System.in));
                     String l;
                     while ((l = r.readLine()) != null) {
-                        synchronized (TRAVA) {
-                            comando(l);
-                        }
+                        comando(l);
+                        // O pulo de trecho nao muda o "estado": sem forcar,
+                        // o PC so saberia na foto de 5 s (sonda de 01/out).
+                        Thread.sleep(150);
+                        sForcar = true;
                         synchronized (TRAVA) {
                             TRAVA.notifyAll();      // foto ja, sem esperar
                         }
@@ -319,6 +357,7 @@ public final class Midia {
         escrever("vigia ok");
         String antes = null;
         long ultima = 0;
+        String fotoAntes = "";
         while (true) {
             String f;
             try {
@@ -328,10 +367,14 @@ public final class Midia {
             }
             String chave = semPosicao(f);
             long agora = System.currentTimeMillis();
-            if (!chave.equals(antes) || agora - ultima > 5000) {
+            boolean pulou = pulou(fotoAntes, f, agora - ultima);
+            if (sForcar || pulou || !chave.equals(antes)
+                    || agora - ultima > 5000) {
+                sForcar = false;
                 escrever(f);
                 antes = chave;
                 ultima = agora;
+                fotoAntes = f;
             }
             synchronized (TRAVA) {
                 TRAVA.wait(300);
