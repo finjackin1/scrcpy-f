@@ -539,8 +539,11 @@ class Central:
                  % (JAR_NO_CELULAR, args)], 15 + 3 * len(chaves)).strip()
             falhas = [x for x in saida.split("\n")
                       if not x.startswith("removido")]
-            self.anotar("notificacoes: remover %d -> %s"
-                        % (len(chaves), (" / ".join(falhas) or "ok")[:300]
+            apps = sorted({c.split("|")[1] for c in chaves
+                           if c.count("|") >= 4})
+            self.anotar("notificacoes: remover %d (%s) -> %s"
+                        % (len(chaves), ", ".join(apps)[:200],
+                           (" / ".join(falhas) or "ok")[:300]
                            if saida else "(sem resposta)"))
             if falhas or not saida:
                 self._sujo.set()             # volta pra lista se nao saiu
