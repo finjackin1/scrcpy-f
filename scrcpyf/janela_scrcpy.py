@@ -301,6 +301,21 @@ def pid_sob_o_mouse() -> int:
         return 0
 
 
+def pid_da_frente() -> int:
+    """O processo dono da janela que esta na frente (0 se nenhuma)."""
+    if not NO_WINDOWS:
+        return 0
+    try:
+        hwnd = _u.GetForegroundWindow()
+        if not hwnd:
+            return 0
+        pid = wintypes.DWORD(0)
+        _u.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        return int(pid.value)
+    except Exception:
+        return 0
+
+
 _U_FOCO = None
 
 

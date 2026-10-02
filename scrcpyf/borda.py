@@ -278,6 +278,18 @@ class _Win:
         frente = self.u.GetForegroundWindow()
         if not frente:
             return False
+        # (02/out, revisao) O vigia pergunta ate 2x por quadro (60-120/s):
+        # a resposta da mesma janela no mesmo monitor vale por 0,25 s.
+        chave = (frente, m["x"], m["y"], m["l"], m["a"])
+        agora = time.monotonic()
+        guardada = getattr(self, "_cheia", None)
+        if guardada and guardada[0] == chave and agora - guardada[1] < 0.25:
+            return guardada[2]
+        cheia = self._tela_cheia_agora(frente, m)
+        self._cheia = (chave, agora, cheia)
+        return cheia
+
+    def _tela_cheia_agora(self, frente, m: dict) -> bool:
         classe = self.ct.create_unicode_buffer(64)
         self.u.GetClassNameW(frente, classe, 64)
         if classe.value in ("Progman", "WorkerW", "Shell_TrayWnd"):
@@ -411,14 +423,18 @@ class _Win:
         depois disso a tecla de captura e ouvida.
         """
         ct, wt = self.ct, self.wt
-
-        class GUITHREADINFO(ct.Structure):
-            _fields_ = [("cbSize", wt.DWORD), ("flags", wt.DWORD),
-                        ("hwndActive", ct.c_void_p), ("hwndFocus", ct.c_void_p),
-                        ("hwndCapture", ct.c_void_p),
-                        ("hwndMenuOwner", ct.c_void_p),
-                        ("hwndMoveSize", ct.c_void_p),
-                        ("hwndCaret", ct.c_void_p), ("rcCaret", wt.RECT)]
+        # (02/out, revisao) A classe nasce uma vez: isto roda em laco de 3-5 ms.
+        GUITHREADINFO = getattr(self, "_gti", None)
+        if GUITHREADINFO is None:
+            class GUITHREADINFO(ct.Structure):
+                _fields_ = [("cbSize", wt.DWORD), ("flags", wt.DWORD),
+                            ("hwndActive", ct.c_void_p),
+                            ("hwndFocus", ct.c_void_p),
+                            ("hwndCapture", ct.c_void_p),
+                            ("hwndMenuOwner", ct.c_void_p),
+                            ("hwndMoveSize", ct.c_void_p),
+                            ("hwndCaret", ct.c_void_p), ("rcCaret", wt.RECT)]
+            self._gti = GUITHREADINFO
 
         info = GUITHREADINFO()
         info.cbSize = ct.sizeof(GUITHREADINFO)
@@ -591,6 +607,26 @@ class GanchoDeTeclas:
         estado = {"ultimo_tab": 0.0, "tab_segurado": False,
                   "engolir_tab_ate_subir": False, "apertadas": set(),
                   "engolidas": {}}
+        # (02/out, revisao) O VOLUME SAI DO GANCHO: mandar ao celular pega a
+        # trava da conversa e pode abrir o adb -- dentro do gancho isso
+        # atrasava o teclado do Windows inteiro (e, passando do prazo do
+        # Windows, o gancho e tirado calado). O gancho so poe na fila.
+        import queue as _fila
+        fila_volume = _fila.SimpleQueue()
+
+        def trabalhar_volume():
+            while True:
+                acao = fila_volume.get()
+                if acao is None:
+                    return
+                try:
+                    if self._ao_volume is not None:
+                        self._ao_volume(acao)
+                except Exception:
+                    pass
+
+        threading.Thread(target=trabalhar_volume, daemon=True,
+                         name="volume").start()
 
         def volume(vk: int, subiu: bool):
             """True = a tecla e de volume e ja foi tratada (engolir)."""
@@ -611,10 +647,7 @@ class GanchoDeTeclas:
                 if acao is None:
                     return False
                 engolidas[vk] = acao
-            try:
-                self._ao_volume(acao)
-            except Exception:
-                pass
+            fila_volume.put(acao)
             return True
 
         def entregar(tecla, subiu: bool) -> None:
@@ -685,6 +718,7 @@ class GanchoDeTeclas:
         self._pronto.set()
         if not manivela:
             log.warning("nao consegui instalar o gancho de teclas")
+            fila_volume.put(None)
             return
         try:
             msg = wintypes.MSG()
@@ -692,6 +726,7 @@ class GanchoDeTeclas:
                 pass
         finally:
             u.UnhookWindowsHookEx(manivela)
+            fila_volume.put(None)            # a thread do volume sai junto
             del proc
 
 
@@ -778,6 +813,9 @@ EMPURRAO_MAX_PX = 60.0
 CPI_PADRAO = 1000.0
 CONTAGENS_POR_MM = CPI_PADRAO / 25.4
 JANELA_DA_VELOCIDADE_S = 0.08
+# Menor tempo considerado no calculo da velocidade (02/out): escolhido pela
+# medicao no celular dele (erro maximo 14% entre lento e muito rapido).
+VELOCIDADE_TEMPO_MIN_S = 0.012
 # A curva do celular dele (Android 16, sensibilidade padrao), para quando nao
 # der para perguntar: {velocidade maxima mm/s, ganho base, reciproco}.
 CURVA_PADRAO = [(32.002, 2.0416, 0.0), (52.83, 3.0656, -32.80256),
@@ -906,7 +944,15 @@ class Estimativa:
             self._soma_x -= vx
             self._soma_y -= vy
         sx, sy = self._soma_x, self._soma_y
-        vel = (sx * sx + sy * sy) ** 0.5 / JANELA_DA_VELOCIDADE_S
+        # (02/out, medido no S22) A velocidade e o caminho dividido pelo
+        # TEMPO DE VERDADE dos movimentos na janela, nao pela janela inteira:
+        # num gesto rapido e curto (20 ms) a divisao fixa por 80 ms dava 1/4
+        # da velocidade, o Android acelerava muito mais que a conta e o
+        # cursor ia ~2x mais longe -- na volta a conta chegava a borda com o
+        # cursor ainda a 20-30% dela ("volta cedo", relato dele). Medido:
+        # conta/real 0,40 -> ~0,9 no rapido; o lento segue 1,0.
+        tempo = max(agora - recentes[0][0], VELOCIDADE_TEMPO_MIN_S)
+        vel = (sx * sx + sy * sy) ** 0.5 / tempo
         self.velocidade = vel
         g = ganho(self.curva, vel, self.contagens_por_mm)
         self.ultimo_ganho = g
@@ -1105,13 +1151,18 @@ class LeitorDoMouse:
         tamanho_cab = ctypes.sizeof(RAWINPUTHEADER)
         # Um mouse de jogo manda centenas de pacotes por segundo: nada aqui
         # dentro pode criar objeto novo a cada pacote (21/set/2026).
+        # (02/out, revisao) ...e o tamanho e as referencias tambem nascem uma
+        # vez so (antes eram 4 objetos ctypes por pacote).
+        tam = ctypes.c_uint(0)
+        tam_dado = ctypes.sizeof(dado)
+        ref_dado, ref_tam = ctypes.byref(dado), ctypes.byref(tam)
+
         def proc(hwnd, msg, wparam, lparam):
             if msg == 0x00FF:                                  # WM_INPUT
                 try:
-                    tam = ctypes.c_uint(ctypes.sizeof(dado))
-                    lido = u.GetRawInputData(ctypes.c_void_p(lparam), 0x10000003,
-                                             ctypes.byref(dado), ctypes.byref(tam),
-                                             tamanho_cab)
+                    tam.value = tam_dado
+                    lido = u.GetRawInputData(lparam, 0x10000003,
+                                             ref_dado, ref_tam, tamanho_cab)
                     if (lido != 0xFFFFFFFF and dado.header.dwType == 0
                             and dado.header.hDevice
                             and not dado.mouse.usFlags & 0x01):   # so relativo
@@ -1419,7 +1470,12 @@ class Borda:
 
                 if not w.existe(hwnd):
                     hwnd = None
-                    if agora - ultima_procura > PROCURAR_JANELA_S:
+                    # (02/out, revisao) Depois do aviso "sem_janela" (15 s),
+                    # procura a cada 2 s: o EnumWindows em todas as janelas
+                    # seguia 4x/s para sempre.
+                    espera = PROCURAR_JANELA_S if inicio != float("inf") \
+                        else max(PROCURAR_JANELA_S, 2.0)
+                    if agora - ultima_procura > espera:
                         ultima_procura = agora
                         hwnd = w.achar(self.pid, self.titulo)
                         if hwnd:
@@ -1475,7 +1531,14 @@ class Borda:
                             and self._tentativas < TENTATIVAS_DE_CALIBRAR
                             and agora >= self._proxima_calibracao
                             and self._mao_parada(pos, agora)
-                            and not w.botao_apertado()):
+                            and not w.botao_apertado()
+                            # (02/out, revisao) Jogo em tela cheia (ou com o
+                            # mouse preso) perdia o foco para a calibracao.
+                            # O "teclado parado" (GetLastInputInfo) ficou de
+                            # fora: no PC dele algo gera entrada sem parar e
+                            # a calibracao nunca mais rodaria.
+                            and (not tela or w.livre(tela))
+                            and not w.tela_cheia_em(alvo[0])):
                         self._proxima_calibracao = agora + ENTRE_CALIBRACOES_S
                         self._tentativas += 1
                         try:

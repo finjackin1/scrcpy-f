@@ -55,6 +55,7 @@ ESPESSURA = 2            # px reais
 OPACIDADE = 130          # de 255: discreta, mas visivel num fundo escuro
 PARADA_S = 1.0               # so para reconferir de vez em quando
 INTERVALO_S = 0.03
+PARADA_NA_TELA_S = 0.25     # (02/out) faixa a vista sem animar: 4x/s
 QUADRO_S = 0.008         # enquanto anima
 BRILHO = 255
 DURACAO_S = 0.22         # acender/apagar
@@ -161,11 +162,14 @@ class Faixa:
     # -- a thread --------------------------------------------------------------
 
     def _garantir_thread(self) -> None:
-        if not NO_WINDOWS or self._thread is not None:
-            return
-        self._thread = threading.Thread(target=self._rodar, daemon=True,
-                                        name="faixa")
-        self._thread.start()
+        # (02/out, revisao) Sob a trava: o vigia e a janela (previa) pedem de
+        # threads diferentes e podiam subir duas faixas.
+        with self._trava:
+            if not NO_WINDOWS or self._thread is not None:
+                return
+            self._thread = threading.Thread(target=self._rodar, daemon=True,
+                                            name="faixa")
+            self._thread.start()
 
     def _rodar(self) -> None:
         try:
@@ -350,7 +354,11 @@ class Faixa:
                     self._novidade.wait(PARADA_S)
                     self._novidade.clear()
                 else:
-                    time.sleep(INTERVALO_S)
+                    # (02/out, revisao) Faixa parada na tela: dorme ate um
+                    # pedido novo (o `pedir`/`brilhar` acordam), olhando no
+                    # maximo 4x/s -- antes eram ~33x/s a extensao inteira.
+                    self._novidade.wait(PARADA_NA_TELA_S)
+                    self._novidade.clear()
         finally:
             if fino:
                 try:

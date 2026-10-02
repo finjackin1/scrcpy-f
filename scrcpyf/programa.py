@@ -692,24 +692,41 @@ class Programa:
             self.anotar("fechar o app %s: tarefa desconhecida, ficou nos "
                         "recentes" % pacote)
             return
-        tarefa, serial = info
+        # (02/out) TODAS as tarefas do app nesta janela: a da abertura e as
+        # das reaberturas da vigia (cada reabertura pode criar uma nova;
+        # antes so a primeira era lembrada e a nova ficava nos recentes).
+        tarefas, serial = info
         serial = getattr(sessao, "serial", "") or serial
+
+        def nos_recentes(tarefa, recentes) -> bool:
+            # (02/out, teste no S22) So a secao "Recent tasks:": antes dela
+            # vem "mHiddenTasks=[...]", que lista tarefas JA tiradas -- e o
+            # fechamento dava "NAO consegui" por engano.
+            return ("#%s " % tarefa) in recentes.split("Recent tasks:", 1)[-1]
+
+        def fechar_uma(tarefa, recentes) -> None:
+            if not nos_recentes(tarefa, recentes):
+                return                   # ja saiu sozinha
+            for jeito in self.JEITOS_DE_FECHAR:
+                self._shell(serial, jeito % tarefa, espera=6)
+                recentes = self._shell(serial, "dumpsys activity recents",
+                                       espera=8)
+                if not nos_recentes(tarefa, recentes):
+                    self.anotar("app %s: fechado no celular (%s, tarefa %s)"
+                                % (pacote, jeito.split(" %")[0], tarefa))
+                    return
+            self.anotar("app %s: NAO consegui fechar no celular (tarefa %s) "
+                        "-- nenhum jeito serviu nesta versao"
+                        % (pacote, tarefa))
 
         def fazer():
             time.sleep(0.8)          # a tela virtual vai embora primeiro
             if pacote in self.apps_abertos():
                 return               # ele abriu de novo nesse meio tempo
-            for jeito in self.JEITOS_DE_FECHAR:
-                self._shell(serial, jeito % tarefa, espera=6)
-                recentes = self._shell(serial, "dumpsys activity recents",
-                                       espera=8)
-                if ("#%s " % tarefa) not in recentes:
-                    self.anotar("app %s: fechado no celular (%s)"
-                                % (pacote, jeito.split(" %")[0]))
-                    return
-            self.anotar("app %s: NAO consegui fechar no celular (tarefa %s) "
-                        "-- nenhum jeito serviu nesta versao"
-                        % (pacote, tarefa))
+            recentes = self._shell(serial, "dumpsys activity recents",
+                                   espera=8)
+            for tarefa in tarefas:
+                fechar_uma(tarefa, recentes)
 
         if esperar:
             fazer()
@@ -726,6 +743,30 @@ class Programa:
         """O numero da tarefa do app na tela virtual `tela`, pelo dumpsys."""
         import re
         pacote = separar_app(pacote)[0]                     # (r186)
+        # (02/out, revisao) PERGUNTA LEVE PRIMEIRO (~9 KB contra ~115 KB do
+        # dumpsys; e chamada a cada 0,3 s ao abrir/trocar app). Formato
+        # conferido no S22: "RootTask id=.. displayId=188" e, embaixo,
+        # "  taskId=3241: <pacote>/<tela> ...".
+        leve = self._shell(serial, "cmd activity stack list", espera=8)
+        if "taskId=" in leve and "RootTask id=" in leve:
+            na_tela = raiz = None
+            visto = False
+            for linha in leve.splitlines():
+                m = re.search(r"RootTask id=(\d+).*?displayId=(\d+)", linha)
+                if m:
+                    raiz, na_tela = m.group(1), m.group(2)
+                    continue
+                if na_tela != tela or "taskId=" not in linha:
+                    continue
+                m = re.match(r"\s*taskId=(\d+): %s/" % re.escape(pacote), linha)
+                if m:
+                    return raiz or m.group(1)   # a raiz, como o dumpsys dava
+                visto = visto or pacote in linha
+            # O app ainda nao esta nesta tela (subindo, ou na troca): "" sem
+            # o dumpsys. Esta mas nao casou (tarefa com tela de outro pacote
+            # na base): o dumpsys, que casa pela linha inteira.
+            if not visto:
+                return ""
         texto = self._shell(serial, "dumpsys activity activities", espera=8)
         dentro = False
         for linha in texto.splitlines():
@@ -735,6 +776,10 @@ class Programa:
                     break
                 dentro = m.group(1) == tela
                 continue
+            # (02/out) O bloco acaba na primeira linha sem recuo: a ultima
+            # tela nao tem "Display #" depois (ver LACO_DA_VIGIA).
+            if dentro and linha[:1] not in ("", " "):
+                break
             if dentro:
                 m = re.search(r"Task\{\w+ #(\d+) .*?%s" % re.escape(pacote),
                               linha)
@@ -1011,19 +1056,36 @@ class Programa:
             next((a[0] for a in (getattr(self, "apps_do_celular", None) or [])
                   if a[1] == app), app)
 
-    def abrir_pela_notificacao(self, app: str, alvo=None) -> None:
+    def abrir_pela_notificacao(self, app: str, alvo=None,
+                               chave: str = "") -> None:
         """
         (01/out) Clique numa notificacao: abre O QUE O TOQUE NO CELULAR
         ABRIRIA (pedido dele), numa janela do PC. O destino vem do
         `dumpsys activity intents` (numa thread); a janela e a do app de
         destino (a do sistema android abre as Configuracoes). Sem destino
         que de para abrir: o app, como antes.
+        (02/out, pedido dele) `chave` = clique no CORPO da notificacao: ela
+        sai, como no celular -- la so as que tem AUTO_CANCEL saem ao toque
+        (as fixas, de musica, de download em andamento ficam). Os botoes da
+        notificacao nao passam chave: no celular eles tambem nao tiram.
         """
         self.anotar("notificacao: abrir %s" % app)
-        threading.Thread(target=self._abrir_destino, args=(app, alvo),
+        threading.Thread(target=self._abrir_destino, args=(app, alvo, chave),
                          daemon=True, name="notif-abrir").start()
 
-    def _abrir_destino(self, app: str, alvo) -> None:
+    def _abrir_destino(self, app: str, alvo, chave: str = "") -> None:
+        try:
+            self._abrir_destino_ja(app, alvo)
+        finally:
+            # Depois de ler o destino: tirar antes podia levar junto o
+            # registro do PendingIntent que o `dumpsys` mostra.
+            n = next((x for x in self.notif.todas() if x.chave == chave),
+                     None) if chave else None
+            if n is not None and "AUTO_CANCEL" in n.flags:
+                self.anotar("notificacao: aberta -> sai (AUTO_CANCEL)")
+                self.notif.remover([chave])
+
+    def _abrir_destino_ja(self, app: str, alvo) -> None:
         from . import notificacoes
         destino = self.notif.destino(alvo) if alvo else {}
         pacote, usuario = separar_app(app)
@@ -1195,7 +1257,11 @@ class Programa:
     # vigiada: o app sumiu -> olha a energia (acorda se a tela apagou) e abre
     # o app de novo, sem animacao. A cada ~6 s confere a energia mesmo com
     # tudo em ordem. `%s` = pares 'tela=componente', entre aspas simples.
-    VIGIA_A_CADA_S = 0.4
+    # (02/out, revisao; ele deixou a decisao comigo) Era 0,4: roda o tempo
+    # todo com qualquer app em janela. A 0,6 pesa 1/3 menos no celular e o
+    # app que saiu volta ~0,2 s mais tarde (o voltar da tela inicial
+    # continua < 1 s).
+    VIGIA_A_CADA_S = 0.6
     # Mata no celular os lacos da vigia (o de agora e sobras). Os colchetes
     # fazem o proprio pkill nao casar com o padrao.
     VIGIA_MATAR = "pkill -f 'scrcpyf-vigi[a]' ; true"
@@ -1210,6 +1276,12 @@ class Programa:
     # isso, reabrir numa tela que acabou de fechar podia jogar o app na tela
     # do celular). Android sem a pergunta leve (resposta vazia): `s=0` e o
     # laco vira o de antes, inteiro.
+    # (02/out, teste no S22) O BLOCO DA TELA ACABA NA PRIMEIRA LINHA SEM
+    # RECUO. Antes ia ate o proximo "Display #" -- a ULTIMA tela virtual
+    # nao tem um depois dela, e o bloco engolia o resto do dumpsys (tarefas
+    # recentes...). La o app aparecia sem "visible=true" e virava
+    # "escondido" para sempre: tela preta e o app nunca reaberto (o relato
+    # dele de 02/out, voltar na tela inicial do Google).
     LACO_DA_VIGIA = (
         "f=/data/local/tmp/scrcpyf-vigia.txt; "
         "sleep 1; n=0; s=1; while :; do n=$((n+1)); d=0; M=; "
@@ -1225,10 +1297,12 @@ class Programa:
         "if [ $s = 1 ]; then l=$(printf '%%s\\n' \"$M\" | "
         "grep \"@D$t\\$\" | grep -m1 \": $k/\"); "
         "case \"$l\" in *visible=true*) continue;; "
-        "?*) echo \"escondido $t\"; continue;; esac; fi; "
+        "?*) v=$(printf '%%s\\n' \"$M\" | grep \"@D$t\\$\" | "
+        "grep -c visible=true); echo \"escondido $t $v\"; continue;; "
+        "esac; fi; "
         "if [ $d = 0 ]; then dumpsys activity activities > $f 2>/dev/null; "
         "d=1; fi; "
-        "b=$(sed -n \"/^Display #$t /,/^Display #/p\" $f); "
+        "b=$(sed -n \"/^Display #$t /,/^[^ ]/p\" $f); "
         "case \"$b\" in '') continue;; esac; "
         "l=$(printf '%%s\\n' \"$b\" | grep -m1 \"Task{.*$k\"); "
         "case \"$l\" in *visible=true*) continue;; "
@@ -1279,7 +1353,7 @@ class Programa:
         while sessao.rodando and not self._sair and time.monotonic() < fim:
             tarefa = self._tarefa_na_tela(serial, tela, pacote)
             if tarefa:
-                self._tarefa_do_app[pacote] = (tarefa, serial)
+                self._tarefa_do_app[pacote] = ([tarefa], serial)
                 break
             time.sleep(0.3)
         while sessao.rodando and not self._sair:
@@ -1295,6 +1369,16 @@ class Programa:
 
     def _religar_vigia(self, serial: str) -> None:
         """Troca o laco do celular pelo da lista de agora (ou so desliga)."""
+        # (02/out, revisao) UM religar por vez, inteiro (pkill + subida): a
+        # troca de janela e o manter-no-app religam de threads diferentes, e
+        # entre o pkill de uma e a subida da outra sobrava um laco orfao NO
+        # CELULAR (matar o adb do PC nao o mata), a 0,4 s, com alvos velhos.
+        trava = self.__dict__.setdefault("_vigia_religar_trava",
+                                         threading.Lock())
+        with trava:
+            self._religar_vigia_ja(serial)
+
+    def _religar_vigia_ja(self, serial: str) -> None:
         import subprocess
         with self._vigia_trava:
             velho, self._vigia_proc = self._vigia_proc, None
@@ -1333,15 +1417,28 @@ class Programa:
                 return
             self._vigia_proc = proc
         de_quem = {tela: pacote for pacote, (tela, _c) in alvos.items()}
+        entrada = {tela: comp for _p, (tela, comp) in alvos.items()}
 
         def ler():
             vezes: dict = {}
+            episodio: dict = {}       # tela -> [ultimo "escondido", trazido]
             for bruta in proc.stdout:
                 linha = bruta.decode("utf-8", "replace").strip()
                 if linha.startswith("vivo"):
                     self.anotar("vigia dos apps: no ar -- telas: %s"
                                 % linha[5:])
                     continue
+                # "escondido <tela> 0" = nada visivel na tela dele (foi
+                # para tras); com numero > 0, outro app esta por cima.
+                if linha.startswith("escondido ") and \
+                        linha.split()[2:3] == ["0"]:
+                    self._voltar_escondido(serial, linha.split()[1],
+                                           de_quem, entrada, episodio)
+                # (02/out) Reaberto pela vigia: a tarefa pode ser outra.
+                if linha.startswith("reaberto ") and \
+                        linha.split()[1] in de_quem:
+                    t = linha.split()[1]
+                    self._seguir_tarefa(serial, t, de_quem[t])
                 # (r114) "escondido" = o app segue na tela virtual, so o
                 # Android o marcou como nao visivel (ex.: jogo aberto no
                 # celular). NAO reabre -- reabrir em loop fazia o video do
@@ -1362,6 +1459,57 @@ class Programa:
                             linha != "acordado" else ""))
 
         threading.Thread(target=ler, daemon=True, name="vigia-le").start()
+
+    # VOLTAR NA TELA INICIAL DO APP DEIXAVA A JANELA PRETA (teste dele,
+    # 02/out/2026, app Google). O app se manda para tras (moveTaskToBack):
+    # a tarefa segue na tela virtual, invisivel, e a tela virtual nao tem
+    # inicio por baixo. Para o vigia isso e "escondido", que nao reabre
+    # (r114). Aqui: escondido, NADA visivel na tela virtual (sem outro app
+    # por cima, ex.: link aberto no navegador) e a janela na frente do PC (esta
+    # usando a janela) -> traz o app de volta UMA vez por episodio, como o
+    # inicio faria (MAIN/LAUNCHER + NEW_TASK|RESET_TASK_IF_NEEDED), sem
+    # recriar a tela. Episodio = "escondido" seguidos (o laco repete a cada
+    # 0,4 s); 1,5 s sem ele = acabou.
+    def _voltar_escondido(self, serial: str, tela: str, de_quem: dict,
+                          entrada: dict, episodio: dict) -> None:
+        from . import janela_scrcpy
+        agora = time.monotonic()
+        ep = episodio.get(tela)
+        if ep is None or agora - ep[0] > 1.5:
+            ep = episodio[tela] = [agora, False]
+        ep[0] = agora
+        chave, comp = de_quem.get(tela), entrada.get(tela)
+        if ep[1] or not chave or not comp:
+            return
+        sessao = self.sessoes.get(APP + chave)
+        pid = getattr(sessao, "pid", 0)
+        if not pid or janela_scrcpy.pid_da_frente() != pid:
+            return
+        ep[1] = True
+        comando = ("am start --user %d -a android.intent.action.MAIN "
+                   "-c android.intent.category.LAUNCHER -f 0x10210000 "
+                   "--display %s -n %s" % (separar_app(chave)[1], tela, comp))
+        if not self._pela_conversa(serial, comando):
+            threading.Thread(target=self._shell, args=(serial, comando, 5),
+                             daemon=True, name="vigia-volta").start()
+        self.anotar("vigia dos apps: %s foi para tras com a janela na "
+                    "frente; trazido de volta" % chave)
+        self._seguir_tarefa(serial, tela, chave)
+
+    def _seguir_tarefa(self, serial: str, tela: str, chave: str) -> None:
+        """(02/out) Depois de uma reabertura: guarda a tarefa nova do app,
+        para fechar tambem ela quando a janela fechar (`_app_fechou`)."""
+        def trabalho():
+            time.sleep(1.5)
+            nova = self._tarefa_na_tela(serial, tela, chave)
+            if not nova:
+                return
+            tarefas, s = self._tarefa_do_app.get(chave, ([], serial))
+            if nova not in tarefas:
+                self._tarefa_do_app[chave] = (tarefas + [nova], s)
+
+        threading.Thread(target=trabalho, daemon=True,
+                         name="seguir-tarefa").start()
 
     # -- vigia do sono -------------------------------------------------------
     # APP NO PC NAO MORRE COM A TELA DO CELULAR APAGADA (pedido dele,
@@ -2063,13 +2211,28 @@ class Programa:
                     "sleep", "df", "toybox", "logcat"}
 
     def ligar_status(self) -> None:
+        # (02/out, revisao) UMA subida por vez: a janela tenta a cada 3 s em
+        # thread nova, e duas juntas subiam medidores em dobro.
+        trava = self.__dict__.setdefault("_status_trava", threading.Lock())
+        if not trava.acquire(blocking=False):
+            return
+        try:
+            self._ligar_status()
+        finally:
+            trava.release()
+
+    def _ligar_status(self) -> None:
         if getattr(self, "_status_procs", None):
             return
-        # (r149) Aqui fica o `achar` de verdade: roda 1x ao entrar na aba, e
-        # com um serial velho o medidor cairia e religaria sem parar.
-        alvo = self._achar_celular()
+        # (02/out, revisao) SO O CELULAR EM USO. Antes, sem ele, caia no
+        # `celular.achar` (reconnect, kill-server, start-server, ate ~25 s) a
+        # cada 3 s com a aba aberta -- derrubava o adb das notificacoes e da
+        # vigia. Achar o celular e trabalho da vigia da conexao.
+        alvo = self._em_uso_pronto()
         if not alvo:
-            self.status_atual = {"erro": "celular não encontrado"}
+            erro = "celular não encontrado"
+            if (getattr(self, "status_atual", None) or {}).get("erro") != erro:
+                self.status_atual = {"erro": erro}   # (dict novo = repinta)
             return
         import subprocess
         # Sobra de vez anterior (ou do programa que caiu) ainda rodando no
@@ -2942,12 +3105,20 @@ class Programa:
     def _componente(self, serial: str, chave: str) -> str:
         """A tela de entrada do app (do usuario dele), ou ""."""
         import re
+        # (02/out, revisao) Guardada por 10 min: abrir, trocar e a copia
+        # perguntavam de novo a cada vez (a copia, duas).
+        guardados = self.__dict__.setdefault("_componentes", {})
+        agora = time.monotonic()
+        achado = guardados.get((serial, chave))
+        if achado and agora - achado[1] < 600:
+            return achado[0]
         pacote, usuario = separar_app(chave)
         comp = self._shell(serial, "cmd package resolve-activity --brief "
                            "--user %d %s | tail -1" % (usuario, pacote))
         comp = (comp.strip().splitlines()[-1:] or [""])[0].strip()
         if not re.fullmatch(r"[A-Za-z0-9._$/]+", comp) or "/" not in comp:
             return ""
+        guardados[(serial, chave)] = (comp, agora)
         return comp
 
     def _abrir_copia(self, serial: str, chave: str, sessao) -> None:
@@ -3104,6 +3275,23 @@ class Programa:
         threading.Thread(target=self._partida, args=(nome,),
                          daemon=True, name="partida-%s" % nome).start()
 
+    def _guardar_endereco(self, serial: str) -> None:
+        """(r139) Pergunta ao celular o endereco dele na rede (numa thread) e
+        guarda como reserva da proxima vez. (02/out) Tambem ao CONECTAR:
+        antes so o espelhar/extensao guardavam, e quem so usava apps em
+        janela ficava com um endereco velho (6 s de espera a cada abertura)."""
+        def trabalho():
+            try:
+                endereco = celular.endereco_na_rede(self.config.adb_exe,
+                                                    serial)
+                if endereco:
+                    self.config.lembrar_ip(endereco)
+            except Exception as erro:
+                log.debug("endereco do celular: %s", erro)
+
+        threading.Thread(target=trabalho, daemon=True,
+                         name="endereco").start()
+
     def _partida(self, nome: str) -> None:
         """Roda fora do laco: acha o celular e sobe o scrcpy."""
         try:
@@ -3114,17 +3302,7 @@ class Programa:
 
             # (r139) O endereco de reserva e so para a PROXIMA vez: pergunta
             # ao celular em paralelo, sem segurar esta partida.
-            def guardar_endereco():
-                try:
-                    endereco = celular.endereco_na_rede(self.config.adb_exe,
-                                                        alvo)
-                    if endereco:
-                        self.config.lembrar_ip(endereco)
-                except Exception as erro:
-                    log.debug("endereco do celular: %s", erro)
-
-            threading.Thread(target=guardar_endereco, daemon=True,
-                             name="endereco").start()
+            self._guardar_endereco(alvo)
 
             # O icone da janela do espelhamento. Falhar aqui nao impede
             # nada: a sessao sobe com o icone padrao do scrcpy.
@@ -3474,6 +3652,7 @@ class Programa:
     # -- o celular conectado: modelo e bateria -----------------------------
 
     VIGIA_CONEXAO_S = 1.5
+    VIGIA_CONEXAO_PARADO_S = 3.0
     PING_S = 8.0            # (r163) de quanto em quanto o celular e cutucado
     PING_ESPERA_S = 4.0     # sem resposta nisso = falhou
 
@@ -3548,7 +3727,13 @@ class Programa:
                 if falhas in (1, 10):
                     self.anotar("vigia da conexao: adb nao respondeu (%s)"
                                 % erro)
-            time.sleep(self.VIGIA_CONEXAO_S)
+            # (02/out, revisao) So na bandeja, sem nada no ar: 3 s (eram
+            # ~2.400 adb.exe por hora a 1,5 s). Janela aberta ou algo
+            # rodando/subindo: o tempo real de sempre.
+            rapido = (self.sessoes or self.ligando or
+                      getattr(self, "janela_na_tela", True))
+            time.sleep(self.VIGIA_CONEXAO_S if rapido else
+                       self.VIGIA_CONEXAO_PARADO_S)
 
     def _dispositivos(self, vistos: dict) -> None:
         """Do laco: a lista de celulares do adb mudou."""
@@ -3570,6 +3755,7 @@ class Programa:
             if escolhido:
                 self.anotar("celular CONECTADO (%s)" % escolhido)
                 self._ler_o_celular(escolhido)
+                self._guardar_endereco(escolhido)
         elif atual and prontos != antes:
             self._reavaliar_conexao()
         if prontos != antes:
@@ -3772,6 +3958,13 @@ class Programa:
             except Exception:
                 pass
             self._bat_proc = None
+            # (02/out, revisao) Trocou de celular: o laco segue rodando NO
+            # celular antigo (matar o adb do PC nao o mata).
+            velho = getattr(self, "_bat_serial", "")
+            if velho and velho != serial:
+                threading.Thread(target=self._shell,
+                                 args=(velho, self.BATERIA_MATAR, 5),
+                                 daemon=True, name="bateria-sai").start()
         if not serial or self._sair:
             return
         agora = time.monotonic()
@@ -3831,6 +4024,12 @@ class Programa:
                             self.config.instalacao_ok else "",
                             int(cel.get("sdk") or 0))
         if not self.sessoes:
+            return
+        # (02/out, revisao) A bateria ja chega pelo vigia dela; a releitura
+        # inteira (getprop, codecs, tamanho da tela) de minuto em minuto so
+        # vale sem ele.
+        bat = getattr(self, "_bat_proc", None)
+        if bat is not None and bat.poll() is None:
             return
         if time.monotonic() - getattr(self, "_celular_lido_em", 0.0) < 60.0:
             return

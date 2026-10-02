@@ -2361,7 +2361,11 @@ class Janela(tk.Tk):
         if not sim:
             # Chegaram: esquece as imagens montadas (inclusive os "nao tem")
             # e redesenha a lista e os icones do rodape.
-            self._fotos.clear()
+            # (02/out, revisao) As velhas ficam vivas ate a proxima chegada:
+            # soltas, o Python apagava a imagem de quem nao e redesenhado
+            # (aviso no canto, escolher app, personalizados).
+            self._fotos_velhas = self._fotos
+            self._fotos = {}
             self._icones_versao += 1
             self._agendar_renovar()
             # (01/out, teste dele: "os icones aparecem e depois somem")
@@ -2498,8 +2502,18 @@ class Janela(tk.Tk):
         if antes == (base, estado):
             return
         blocos = getattr(self, "_blocos_app", None) or {}
-        if antes is not None and antes[0] == base and blocos and \
-                str(rol.canvas) not in getattr(self, "_lotes_de", ()):
+        sem_lotes = str(rol.canvas) not in getattr(self, "_lotes_de", ())
+        # (02/out, revisao) SO OS ICONES CHEGARAM: cada bloco e refeito no
+        # lugar, sem esvaziar a grade (antes ela sumia e voltava em lotes e
+        # a rolagem pulava para o topo).
+        if antes is not None and blocos and sem_lotes and \
+                antes[1] == estado and antes[0][7] != base[7] and \
+                antes[0][:7] == base[:7] and antes[0][8:] == base[8:]:
+            self._apps_pintado = (base, estado)
+            for chave, info in list(blocos.items()):
+                self._refazer_bloco(chave, info, abertos, subindo)
+            return
+        if antes is not None and antes[0] == base and blocos and sem_lotes:
             mudou = (antes[1][0] ^ abertos) | (antes[1][1] ^ subindo)
             self._apps_pintado = (base, estado)
             for chave, info in list(blocos.items()):
@@ -2511,7 +2525,7 @@ class Janela(tk.Tk):
                   and antes[0][-2:] == base[-2:])
         self._apps_pintado = (base, estado)
         self._blocos_app = {}
-        rol.limpar(manter)
+        ponto = rol.limpar(manter)
         dentro = rol.dentro
         if not self._apps:
             if self._apps_carregando:
@@ -2555,7 +2569,14 @@ class Janela(tk.Tk):
 
         # Na hora so o que cabe na tela (~3 fileiras); o resto em lotes.
         primeiro = max(12, colunas * 3)
-        self._em_lotes(rol.canvas, trabalhos, fazer, primeiro=primeiro)
+        # (02/out, revisao) A rolagem volta DEPOIS do ultimo lote: no
+        # `after_idle` do limpar so havia ~3 fileiras e ela era cortada.
+        def voltar():
+            if rol.canvas.winfo_exists():
+                rol.canvas.update_idletasks()
+                rol.canvas.yview_moveto(ponto)
+        self._em_lotes(rol.canvas, trabalhos, fazer, primeiro=primeiro,
+                       ao_fim=voltar if manter else None)
 
     def _medidas_dos_apps(self) -> tuple:
         """(largura e altura do bloco na grade, icone na grade, icone na
@@ -3261,9 +3282,18 @@ class Janela(tk.Tk):
             self._escolhendo_app = False
             self._montar_conteudo()
 
+        feito = [None]
+        espera = [None]
+
         def pintar(_e=None):
             self._busca_escolha = busca.get()
             termo = self._busca_escolha.strip().lower()
+            # (02/out, revisao) Seta, Tab, Shift e repeticao do mesmo termo
+            # nao refazem as 80 linhas (nem jogam a lista para o topo).
+            agora = (termo, id(self._apps), self._apps_carregando)
+            if agora == feito[0]:
+                return
+            feito[0] = agora
             rol.limpar()
             apps = sorted((a for a in (self._apps or [])
                            if not termo or termo in a[0].lower()),
@@ -3290,7 +3320,14 @@ class Janela(tk.Tk):
                     peca.bind("<Button-1>", lambda _e, pk=pacote, n=nome:
                               escolher(pk, n))
 
-        busca.bind("<KeyRelease>", pintar)
+        def depois(_e=None):
+            # 120 ms depois da ultima tecla, como a busca da grade de apps.
+            if espera[0]:
+                self.after_cancel(espera[0])
+            espera[0] = self.after(
+                120, lambda: rol.canvas.winfo_exists() and pintar())
+
+        busca.bind("<KeyRelease>", depois)
         pintar()
         self.after(30, lambda: busca.winfo_exists() and busca.focus_set())
 
@@ -3305,6 +3342,12 @@ class Janela(tk.Tk):
         if vistos is None:
             vistos = self._cortes_anotados = set()
         tela = "%s/%s" % (self._item, self._aba.get(self._item, ""))
+        # (02/out, revisao) Uma conferencia por tela por execucao: na grade
+        # de apps eram milhares de perguntas ao Tk a cada remontagem.
+        conferidas = self.__dict__.setdefault("_telas_conferidas", set())
+        if tela in conferidas or not self._na_tela():
+            return                  # (escondida: nada mapeado para medir)
+        conferidas.add(tela)
         limite = self.winfo_rootx() + self.winfo_width()
         # (limpeza 01/out) As telas guardadas ficam ATRAS da atual, mapeadas:
         # conferi-las acusava corte com o nome da aba errada no relatorio.
@@ -3494,7 +3537,7 @@ class Janela(tk.Tk):
         os medidores -- o celular so e consultado enquanto se olha.
         """
         ui = self._ui.get("status")
-        a_vista = (self._item == "celular" and self._visivel
+        a_vista = (self._item == "celular" and self._na_tela()
                    and not self._grande and ui is not None)
         # RELOGIO PROPRIO (r96): isto so rodava quando o estado do programa
         # mudava (`_repintar`), por isso os numeros so trocavam ao sair e
@@ -3675,6 +3718,12 @@ class Janela(tk.Tk):
 
         threading.Thread(target=trabalho, daemon=True, name="uso").start()
 
+    def _na_tela(self) -> bool:
+        """(02/out, revisao) Aberta E nao minimizada: minimizada, `_visivel`
+        segue True e o status (0,25 s no celular) e a barra do player
+        continuavam trabalhando para ninguem."""
+        return self._visivel and not moldura.situacao(self)[0]
+
     def _mouse_sobre(self, dono) -> bool:
         """O mouse esta em cima de `dono`, a vista, com a janela aberta?"""
         try:
@@ -3734,11 +3783,13 @@ class Janela(tk.Tk):
         texto, cor = self._status_parear
         s = E.Texto(pai, texto, cor=cor, largura=E.px(230))
         s.pack(side="top", fill="x", pady=(E.px(10), E.px(0)))
-        self._ui["status"] = s
+        # (02/out) Chave propria: "status" e o dict da tela STATUS, e o
+        # configure num dict derrubava o _repintar com a aba STATUS aberta.
+        self._ui["status_parear"] = s
 
     def _pintar_status(self, texto: str, cor: str = E.TEXTO_2) -> None:
         self._status_parear = (texto, cor)
-        s = self._ui.get("status")
+        s = self._ui.get("status_parear")
         if s is not None:
             try:
                 s.configure(text=texto, fg=cor)
@@ -4503,8 +4554,12 @@ class Janela(tk.Tk):
                            nt_codigo(n))
                 cartao = cartoes.get(n.chave)
                 if cartao is not None and cartao[1] != assin_c:
-                    cartao[0].destroy()
-                    cartao = None
+                    if self._texto_no_lugar(cartao, app, n, assin_c):
+                        cartao = cartoes[n.chave] = (cartao[0], assin_c) + \
+                            cartao[2:]
+                    else:
+                        cartao[0].destroy()
+                        cartao = None
                 if cartao is None:
                     cartao = cartoes[n.chave] = self._cartao_notif(d, app, n)
                 vivos_c.add(n.chave)
@@ -4619,7 +4674,31 @@ class Janela(tk.Tk):
                 w.bind("<Leave>", lambda _e: card.configure(
                     highlightbackground=E.LINHA), add="+")
         return (card, (n.conteudo(), n.limpavel,
-                       tuple(r for r, _a in botoes), codigo), hora)
+                       tuple(r for r, _a in botoes), codigo), hora,
+                titulo, t if corpo else None)
+
+    def _texto_no_lugar(self, cartao, app: str, n, assin_c) -> bool:
+        """(02/out, revisao) So o titulo/texto mudou (download, "carregando
+        58%"): troca no cartao, sem destruir e recriar. False = o resto
+        mudou (x, botoes, codigo, texto que aparece/some): refazer."""
+        card, velha, hora, titulo, corpo_lbl = cartao
+        if velha[1:] != assin_c[1:]:
+            return False
+        corpo = n.texto or n.subtexto
+        if bool(corpo) != (corpo_lbl is not None):
+            return False
+        try:
+            t = _encurtar(n.titulo or self._nome_notif(app), 60)
+            if titulo.cget("text") != t:
+                titulo.configure(text=t)
+            if corpo:
+                if len(corpo) > self.NOTIF_TEXTO_MAX:
+                    corpo = corpo[:self.NOTIF_TEXTO_MAX - 1] + "…"
+                if corpo_lbl.cget("text") != corpo:
+                    corpo_lbl.configure(text=corpo)
+        except tk.TclError:
+            return False
+        return True
 
     # -- o player (01/out/2026, pedido dele) --------------------------------
     # Cartao no topo das notificacoes, como no celular: o app, a musica, a
@@ -4804,6 +4883,15 @@ class Janela(tk.Tk):
         if not pl or not pl["frame"].winfo_exists():
             return
         m = pl.get("sessao")
+        # (02/out, revisao) Chegou foto nova do celular (so a posicao muda
+        # nao repinta o cartao): pega a sessao nova, senao um "pular" feito
+        # no celular nao aparecia na barra do PC.
+        versao = self.programa.notif.midias_versao
+        if m and pl.get("versao") != versao:
+            pl["versao"] = versao
+            novo = self.programa.notif.player()
+            if novo and novo["pacote"] == m["pacote"]:
+                pl["sessao"] = m = novo
         b = pl["barra"]
         larg, alt = b.winfo_width(), b.winfo_height()
         if not m or larg < 4:
@@ -5084,14 +5172,14 @@ class Janela(tk.Tk):
         alvo = next((n.alvo for n in self.programa.notif.todas()
                      if n.chave == chave), None)
         if alvo is not None or self._app_abre(app):
-            self.programa.abrir_pela_notificacao(app, alvo)
+            self.programa.abrir_pela_notificacao(app, alvo, chave)
 
     HORAS_A_CADA_S = 20.0
 
     def _giro_notif(self) -> None:
         """Os avisos no canto da tela (`aviso_notif`), na thread do Tk; e a
         hora das notificacoes a vista, de tempos em tempos, no lugar."""
-        if self._item == "notif" and self._visivel:
+        if self._item == "notif" and self._na_tela():
             agora = time.monotonic()
             if agora - getattr(self, "_horas_em", 0.0) >= self.HORAS_A_CADA_S:
                 self._horas_em = agora
@@ -5165,7 +5253,7 @@ class Janela(tk.Tk):
         alvo = next((n.alvo for n in self.programa.notif.todas()
                      if n.chave == chave), None)
         if alvo is not None or self._app_abre(app):
-            self.programa.abrir_pela_notificacao(app, alvo)
+            self.programa.abrir_pela_notificacao(app, alvo, chave)
         else:
             self.abrir_em("notif", "lista")
             self.mostrar()
@@ -5345,7 +5433,23 @@ class Janela(tk.Tk):
         if not linhas or not linhas["app"][0].winfo_exists():
             return
         p = self.programa
-        ok, _t = conexao.conferir_pasta(self._config.scrcpy)
+        # (02/out, revisao) Roda a cada `_repintar` com OPCOES aberta: a pasta
+        # (disco, na thread do Tk) e conferida no maximo a cada 5 s, e cada
+        # rotulo so e mexido se mudou.
+        agora = time.monotonic()
+        guardada = getattr(self, "_pasta_conferida", None)
+        if guardada and guardada[0] == self._config.scrcpy and \
+                agora - guardada[1] < 5.0:
+            ok = guardada[2]
+        else:
+            ok, _t = conexao.conferir_pasta(self._config.scrcpy)
+            self._pasta_conferida = (self._config.scrcpy, agora, ok)
+
+        def mudar(w, **kw):
+            novo = {k: v for k, v in kw.items() if str(w.cget(k)) != str(v)}
+            if novo:
+                w.configure(**novo)
+
         v_scrcpy = getattr(p, "_versao_scrcpy", None)
         if ok and v_scrcpy is None and not getattr(self, "_lendo_versao",
                                                    False):
@@ -5364,7 +5468,7 @@ class Janela(tk.Tk):
         versoes = {"app": VERSAO,
                    "scrcpy": (v_scrcpy or "…") if ok else "—"}
         for chave, (versao, estado) in linhas.items():
-            versao.configure(text=versoes[chave])
+            mudar(versao, text=versoes[chave])
             tipo, texto = p.estado_atualizacao.get(chave, ("info", ""))
             if chave == "scrcpy" and not ok:
                 tipo, texto = "falta", "não instalado"
@@ -5375,18 +5479,18 @@ class Janela(tk.Tk):
             marca = {"ok": "✓  ", "nova": "●  ", "erro": "!  ",
                      "falta": ""}.get(tipo, "")
             clicavel = tipo == "nova" and not procurando
-            estado.configure(
-                text=marca + texto + ("  ›" if clicavel else ""), fg=cor,
-                cursor="hand2" if clicavel else "arrow",
-                takefocus=1 if clicavel else 0)
+            mudar(estado,
+                  text=marca + texto + ("  ›" if clicavel else ""), fg=cor,
+                  cursor="hand2" if clicavel else "arrow",
+                  takefocus=1 if clicavel else 0)
             estado._clicavel = clicavel
         quando = self._ui.get("procura")
         if quando is not None and quando.winfo_exists():
             andamento = getattr(self, "_instalar_texto", None)
             if andamento:                   # (r166) instalando / falhou
-                quando.configure(text=andamento[0], fg=andamento[1])
+                mudar(quando, text=andamento[0], fg=andamento[1])
             else:
-                quando.configure(text=_quando(self._config.opcoes.get(
+                mudar(quando, text=_quando(self._config.opcoes.get(
                     "ultima_procura")), fg=E.TEXTO_2)
 
     def _clicou_estado(self, rotulo) -> str:
@@ -5668,6 +5772,7 @@ class Janela(tk.Tk):
 
         def fim(ok, texto):
             self._instalando = False
+            self._pasta_conferida = None        # a pasta mudou: confere ja
             if ok:
                 # A tabela diz "em dia"; o texto volta ao "conferido".
                 self._instalar_texto = None
@@ -6393,6 +6498,7 @@ class Janela(tk.Tk):
         # (r165) CADA PARTE NO SEU TRY: antes um erro que se repetisse no
         # passo do programa pulava todo giro os atalhos, o chamado e os
         # recados das threads -- o programa ficava surdo.
+        self.programa.janela_na_tela = self._visivel   # (02/out) vigia
         self._parte_do_giro(self.programa.passo)
         self._parte_do_giro(self._giro_chamado)
         self._parte_do_giro(self._giro_atalhos)
@@ -6923,9 +7029,10 @@ class _Rolagem:
             self.canvas.yview_scroll(passos, "units")
         return "break"
 
-    def limpar(self, manter: bool = False) -> None:
+    def limpar(self, manter: bool = False) -> float:
         """Esvazia a lista. `manter`: volta ao mesmo ponto da rolagem depois
-        de remontar (abrir um app nao joga a lista para o topo)."""
+        de remontar (abrir um app nao joga a lista para o topo). Devolve o
+        ponto, para quem monta em lotes repor no fim."""
         ponto = self._pos[0]
         for filho in self.dentro.winfo_children():
             filho.destroy()
@@ -6933,6 +7040,7 @@ class _Rolagem:
             self.canvas.after_idle(lambda: self.canvas.yview_moveto(ponto))
         else:
             self.canvas.yview_moveto(0)
+        return ponto
 
 
 def _gb(n: float) -> str:

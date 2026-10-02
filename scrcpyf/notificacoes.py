@@ -48,7 +48,11 @@ MATAR = ("pkill -f 'scrcpyf_noti[f]' ; pkill -f 'scrcpyf.Midi[a]' ; true")
 JAR_NO_CELULAR = "/data/local/tmp/scrcpyf-notif.jar"
 HISTORICO_HORAS = 24
 HISTORICO_MAX = 500
-CONFERENCIA_S = 20.0
+# (02/out, revisao) Era 20 s: os eventos do logcat ja trazem cada mudanca
+# na hora; a conferencia e so a rede de seguranca e acordava o celular
+# (CPU e Wi-Fi) 3x por minuto, mesmo de tela apagada.
+CONFERENCIA_S = 60.0
+FIXA_ESPERA_S = 5.0               # (02/out) fixa que se atualiza: 1 G / 5 s
 JUNTAR_RAJADA_S = 0.03            # (01/out) era 0,15: o atraso era sentido
 
 # A conversa que obedece pedidos (uma linha por pedido, "@fim" no fim de
@@ -145,6 +149,14 @@ class Notif:
     def resumo(self) -> bool:
         return "GROUP_SUMMARY" in self.flags
 
+    @property
+    def interna(self) -> bool:
+        """(02/out, teste no S22) A "MediaOngoingActivity" da interface do
+        sistema: a Samsung a cria quando toca musica (Now Bar), sem texto --
+        so o nome do canal. O player ja mostra a musica; no PC ela nao entra."""
+        return self.pacote == "com.android.systemui" and \
+            self.canal.endswith("OngoingActivity")
+
     def conteudo(self) -> tuple:
         return (self.titulo, self.texto, self.subtexto)
 
@@ -208,8 +220,10 @@ def ler_detalhe(chave: str, texto: str) -> Notif | None:
         if m:
             quando = int(m.group(1))
             continue
+        # (02/out) Sem exigir o "}" logo depois do tipo: o Android 16 poe
+        # " (allowlist: ...)" ali, e o clique abria so a tela inicial.
         m = re.search(r"contentIntent=PendingIntent\{\w+: PendingIntentRecord"
-                      r"\{(\w+) (\S+) (\w+)\}", linha)
+                      r"\{(\w+) (\S+) (\w+)", linha)
         if m:
             alvo = (m.group(1), m.group(2), m.group(3))
             continue
@@ -436,6 +450,8 @@ class Central:
         self._procs: list = []
         self._sujo = threading.Event()
         self._eventos: list = []          # (tipo, chave, hora) do logcat
+        self._detalhado_em: dict = {}     # chave -> ultimo "G" (fixas)
+        self._adiadas: dict = {}          # chave -> quando pedir de novo
         self._medidas = 0                 # quantas chegadas ja medidas
         self.prefs: dict = {}             # pacote -> tela de config. propria
         self._servidor = None
@@ -620,6 +636,7 @@ class Central:
                 return
             self._midia_proc = proc
             linhas: list = []
+            subiu_em = time.monotonic()
             for bruta in proc.stdout:
                 if geracao != self._geracao:
                     break
@@ -636,6 +653,11 @@ class Central:
                     self.anotar("player: %s" % linha[:200])
             if geracao != self._geracao:
                 break
+            # (02/out, revisao) Ficou de pe um bom tempo: a queda e nova, nao
+            # a mesma de antes. Sem isto, 20 quedas somadas no dia (Wi-Fi que
+            # oscila) matavam o player ate a proxima reconexao.
+            if time.monotonic() - subiu_em > 120:
+                falhas = 0
             falhas += 1
             self._jar_pronto = ""            # o jar pode ter saido do celular
             if falhas in (1, 5):
@@ -812,6 +834,8 @@ class Central:
             acordou = self._sujo.wait(timeout=1.0)
             if geracao != self._geracao:
                 break
+            if self._vencidas():
+                acordou = True
             if not acordou and time.monotonic() - ultima < CONFERENCIA_S:
                 continue
             if acordou:
@@ -824,7 +848,7 @@ class Central:
                 # ja diz QUAL notificacao chegou/saiu -- detalha so ela, sem
                 # pedir a lista inteira antes. A lista inteira so na 1a
                 # leitura, no "saiu tudo de um app", em evento sem chave e na
-                # conferencia de 20 s.
+                # conferencia (CONFERENCIA_S).
                 if completa or not eventos or any(
                         t == "tudo" or not k for t, k, _q in eventos) or \
                         not self._aplicar_eventos(eventos):
@@ -838,6 +862,23 @@ class Central:
             if self._servidor is None or self._servidor.poll() is not None:
                 self.anotar("notificacoes: a conversa com o celular caiu")
                 break
+            # (02/out, revisao) O leitor de eventos (logcat) caiu com a
+            # conversa viva: sem isto as notificacoes so chegavam na
+            # conferencia, ate a proxima reconexao.
+            if not self._vivo():
+                self.anotar("notificacoes: o leitor de eventos caiu")
+                break
+
+    def _vencidas(self) -> bool:
+        """As fixas adiadas cujo prazo venceu voltam como evento "chegou"."""
+        agora = time.monotonic()
+        with self._trava:
+            prontas = [k for k, quando in self._adiadas.items()
+                       if quando <= agora]
+            for k in prontas:
+                del self._adiadas[k]
+                self._eventos.append(("chegou", k, agora))
+        return bool(prontas)
 
     def _detalhar(self, chaves: list) -> dict | None:
         """{chave: Notif} das chaves pedidas, numa ida so ("G"). None =
@@ -862,7 +903,28 @@ class Central:
         final: dict = {}
         for tipo, chave, _q in eventos:
             final[chave] = tipo            # o ultimo de cada chave vale
+        # (02/out, revisao) FIXA QUE SE ATUALIZA (download, "carregando
+        # 58%", navegacao): no maximo um "G" a cada FIXA_ESPERA_S por chave.
+        # A atualizacao do meio fica guardada e e pedida quando o prazo vence
+        # (`_vencidas`), entao a ultima nunca se perde.
+        agora = time.monotonic()
+        with self._trava:
+            for k in [k for k, t in final.items() if t == "chegou"]:
+                velha = self.ativas.get(k)
+                feito = self._detalhado_em.get(k, 0.0)
+                if velha is not None and velha.fixa and \
+                        agora - feito < FIXA_ESPERA_S:
+                    self._adiadas[k] = feito + FIXA_ESPERA_S
+                    del final[k]
+        if not final:
+            return True
         chegou = [k for k, t in final.items() if t == "chegou"]
+        with self._trava:
+            if len(self._detalhado_em) > 500:      # nao cresce para sempre
+                self._detalhado_em.clear()
+            for k in chegou:
+                self._detalhado_em[k] = agora
+                self._adiadas.pop(k, None)
         detalhes = self._detalhar(chegou)
         if detalhes is None:
             return True                    # conversa caida: nada a fazer
@@ -900,6 +962,7 @@ class Central:
 
     def _aplicar(self, novas: dict, antigas: dict, desde) -> None:
         """Poe a lista nova no lugar: historico, avisos, log e a janela."""
+        novas = {c: n for c, n in novas.items() if not n.interna}
         chegaram = [n for c, n in novas.items()
                     if c not in antigas or antigas[c].conteudo() != n.conteudo()]
         sairam = [n for c, n in antigas.items() if c not in novas]
@@ -994,9 +1057,16 @@ class Central:
 
     def reler_bloqueados(self) -> None:
         """A aba de ajustes abriu: confere de novo (numa thread)."""
-        if self._servidor is not None:
-            threading.Thread(target=self._ler_bloqueados, daemon=True,
-                             name="notif-bloq").start()
+        # (02/out, revisao) E um `dumpsys notification` inteiro (pesado no
+        # celular): no maximo 1 a cada 10 s (trocar de aba e voltar nao
+        # repete; desativar um app nas Configuracoes e voltar ainda pega).
+        agora = time.monotonic()
+        if self._servidor is None or \
+                agora - getattr(self, "_bloq_lido_em", -99.0) < 10.0:
+            return
+        self._bloq_lido_em = agora
+        threading.Thread(target=self._ler_bloqueados, daemon=True,
+                         name="notif-bloq").start()
 
     def _ganchos(self, funcao, *args) -> None:
         try:

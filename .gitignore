@@ -48,6 +48,8 @@ iniciar-claude.bat
 
 # Documento interno (escrito por Claude para Claude), zips e sobras
 docs/CONTEXTO.md
+docs/PARADA.md
+docs/contexto/
 docs/historico/
 *.zip
 *.bak

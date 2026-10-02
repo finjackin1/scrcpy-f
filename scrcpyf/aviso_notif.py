@@ -67,6 +67,35 @@ def _sem_foco(janela: tk.Toplevel) -> None:
         log.debug("aviso sem foco: %s", erro)
 
 
+def _da_frente():
+    """A janela que esta na frente agora (None fora do Windows/erro)."""
+    if not NO_WINDOWS:
+        return None
+    try:
+        import ctypes
+        return ctypes.windll.user32.GetForegroundWindow()
+    except Exception:
+        return None
+
+
+def _devolver_frente(antes, janela: tk.Toplevel) -> None:
+    """Se o aviso ficou com a frente, ela volta para `antes`."""
+    if not NO_WINDOWS or not antes:
+        return
+    try:
+        import ctypes
+        u = ctypes.windll.user32
+        agora = u.GetForegroundWindow()
+        if agora == antes:
+            return
+        meu = u.GetParent(janela.winfo_id()) or janela.winfo_id()
+        if agora in (meu, janela.winfo_id()):
+            u.SetForegroundWindow(antes)
+            log.debug("aviso: frente devolvida")
+    except Exception as erro:
+        log.debug("aviso: devolver a frente: %s", erro)
+
+
 class Avisos:
     """Os avisos na tela. `icone(pai, app, nome, lado)` desenha o icone do
     app (o da janela); `ao_clicar(app)` abre o app."""
@@ -195,9 +224,14 @@ class Avisos:
         animar = moldura.animacoes_ligadas()
         if animar:
             j.attributes("-alpha", 0.0)
+        antes = _da_frente()
         j.deiconify()
         _sem_foco(j)
         j.lift()
+        # (02/out, revisao) O `deiconify` do Tk ativa a janela ANTES do
+        # NOACTIVATE valer: com o scrcpy-f na frente (digitando na busca,
+        # por exemplo) o aviso levava o foco. Levou -> devolve.
+        _devolver_frente(antes, j)
         if animar:
             self._esmaecer(j, 0.0, 1.0, ENTRA_MS)
         if not chamada:
