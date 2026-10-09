@@ -33,8 +33,8 @@ recurso não existe na versão dele, em vez de quebrar.
 
 | Item | Para que serve |
 |---|---|
-| **Espelhar** (Ctrl+Alt+1) | a tela e/ou o som do celular no PC, com vídeo ajustado para a menor latência. No modo **só som** você joga no celular e ouve no PC |
-| **Extensão** (Ctrl+Alt+2) | o celular vira uma tela a mais do PC: o mouse e o teclado passam para ele pela borda (veja abaixo) |
+| **Espelhar** | a tela e/ou o som do celular no PC, com vídeo ajustado para a menor latência. No modo **só som** você joga no celular e ouve no PC |
+| **Extensão** | o celular vira uma tela a mais do PC: o mouse e o teclado passam para ele pela borda (veja abaixo) |
 | **Apps** | cada app do celular numa janela própria do Windows, com o ícone e o nome do app e um botão separado na barra de tarefas. O celular continua livre na sua mão |
 | **Status** | bateria, temperatura, memória e o que mais pesa no celular |
 | **Notificações** | as notificações do celular no PC, como no celular: **×** remove lá também, e o que você tira no celular some aqui. Um aviso no canto da tela quando chega uma (clique abre o app numa janela do PC; respeita o "não perturbe" do Windows). **histórico** das últimas 24 horas. Em **ajustes**, uma chave geral (todos os apps) e uma por app; o botão direito num app, em Apps, também liga ou desliga. Mostra quais apps estão com as notificações desligadas no próprio celular. Nada disso muda o celular. **No Windows:** as notificações também ficam na Central de Notificações (clique abre no scrcpy-f) e a música que toca no celular aparece nos controles de mídia do Windows, com as teclas de música do teclado. O **player** fica no topo da aba, com barra de progresso e botões; botão direito numa notificação traz as opções do Android (configurações, desativar...); código de verificação ganha "copiar código". **Responder pelo PC** (sem instalar nada no celular): os botões do próprio app (Responder, Marcar como lida, Curtir...) no cartão aberto, no aviso do canto e na Central do Windows; clicar na notificação abre o item exato (a conversa, o e-mail) na janela do app; foto de quem mandou e imagem da notificação. **Mini player**: o player do celular numa janelinha junto do relógio (menu do ícone ou atalho) |
@@ -42,6 +42,10 @@ recurso não existe na versão dele, em vez de quebrar.
 | **Opções** | avisos do programa, abrir com o Windows, página inicial, pasta do scrcpy e atualizações; atalhos de teclado (com busca); **rodapé** com indicadores de conexão e som (cada gesto pode ganhar uma função). **Qualidade**, igual no cabo e no sem fio: **imagem** 540p / 720p / 1080p (4 / 8 / 16 Mb/s, 60 quadros, sem atraso), **som** normal ou alto, **janela dos apps** (pc / tablet ou celular) e **tamanho nos apps** (90% a 130%). Espelhar, Extensão e cada app podem ter a sua. No sem fio, o codificador do celular trabalha em tempo real e o Wi-Fi do celular entra no modo de baixa latência enquanto houver sessão (volta ao normal sozinho) |
 
 Tudo é gravado no instante do clique, sem botão de salvar.
+
+**Atalhos de teclado:** o programa não vem com nenhum (nada de tecla ocupada
+sem você saber). Em **Opções › atalhos** você grava o seu para cada modo e
+para abrir cada app.
 
 ### Apps em janela própria
 
