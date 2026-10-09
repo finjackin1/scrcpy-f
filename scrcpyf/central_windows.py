@@ -37,14 +37,26 @@ PROTOCOLO = "scrcpyf"
 
 
 def disponivel() -> bool:
+    """(08/out, otimizacao: o import do winrt -- asyncio junto -- custava
+    ~130 ms na partida) So confere que o pywinrt esta instalado, sem
+    importar; o import de verdade vai para uma thread (`aquecer`). Se algo
+    faltar la dentro, as classes abaixo falham caladas e anotam (_falhou)."""
     if sys.platform != "win32":
         return False
     try:
-        import winrt.windows.ui.notifications  # noqa: F401
-        import winrt.windows.media.playback  # noqa: F401
-        return True
+        import importlib.util
+        return importlib.util.find_spec("winrt") is not None
     except Exception:
         return False
+
+
+def aquecer() -> None:
+    """Importa o winrt fora da partida (thread): a 1a notificacao nao paga."""
+    try:
+        import winrt.windows.ui.notifications  # noqa: F401
+        import winrt.windows.media.playback  # noqa: F401
+    except Exception as erro:
+        log.info("windows: winrt nao carregou (%s)", erro)
 
 
 def _escrever(caminho: str, valores: dict) -> bool:
@@ -88,9 +100,16 @@ def etiqueta(chave: str) -> str:
     return hashlib.sha1(chave.encode("utf-8")).hexdigest()[:16]
 
 
-def endereco(chave: str, app: str) -> str:
-    return "%s:notif?c=%s&a=%s" % (PROTOCOLO, quote(chave, safe=""),
-                                   quote(app, safe=""))
+def endereco(chave: str, app: str, tipo: str = "notif",
+             indice: int | None = None) -> str:
+    """O endereco que o Windows abre no clique. `tipo`: "notif" (o corpo),
+    "acao" (um botao do app, `indice`) ou "responder" (abre a caixa de
+    resposta no scrcpy-f)."""
+    url = "%s:%s?c=%s&a=%s" % (PROTOCOLO, tipo, quote(chave, safe=""),
+                               quote(app, safe=""))
+    if indice is not None:
+        url += "&i=%d" % indice
+    return url
 
 
 def ler_endereco(url: str) -> tuple[str, str]:
@@ -101,6 +120,18 @@ def ler_endereco(url: str) -> tuple[str, str]:
         return (partes.get("c", [""])[0], partes.get("a", [""])[0])
     except Exception:
         return "", ""
+
+
+def ler_tipo(url: str) -> tuple[str, int | None]:
+    """(tipo, indice) do endereco: ("notif", None), ("acao", 2)..."""
+    from urllib.parse import parse_qs, urlsplit
+    try:
+        u = urlsplit(url)
+        i = parse_qs(u.query).get("i", [None])[0]
+        return (u.path or "notif").strip("/"), (int(i) if i is not None
+                                                 else None)
+    except Exception:
+        return "notif", None
 
 
 def _xml(texto: str) -> str:
@@ -117,6 +148,9 @@ class NotificacoesWindows:
         self._trava = threading.Lock()
         self._notificador = None
         self._falhou = False
+        # (03/out) as notificacoes mostradas, por chave (para tirar depois).
+        # Os botoes vao pelo endereco "scrcpyf:" (ver `_xml_acoes`).
+        self._vivas: dict = {}
 
     def _notif(self):
         if self._notificador is None and not self._falhou:
@@ -131,7 +165,11 @@ class NotificacoesWindows:
         return self._notificador
 
     def mostrar(self, chave: str, app: str, nome_app: str, titulo: str,
-                texto: str, icone: Path | None) -> None:
+                texto: str, icone: Path | None, acoes=None,
+                rosto: Path | None = None) -> None:
+        """`acoes` = [(indice, titulo, com_texto)] (do ouvinte): o primeiro
+        com texto vira a caixa "responder" + enviar; os outros, botoes.
+        `rosto` = foto de quem mandou (redonda, no lugar do icone)."""
         try:
             from winrt.windows.data.xml.dom import XmlDocument
             from winrt.windows.ui.notifications import ToastNotification
@@ -140,28 +178,74 @@ class NotificacoesWindows:
                 if notif is None:
                     return
                 imagem = ""
-                if icone is not None and Path(icone).exists():
+                if rosto is not None and Path(rosto).exists():
+                    imagem = ('<image placement="appLogoOverride" '
+                              'hint-crop="circle" src="%s"/>'
+                              % _xml(Path(rosto).as_uri()))
+                elif icone is not None and Path(icone).exists():
                     imagem = ('<image placement="appLogoOverride" '
                               'src="%s"/>' % _xml(Path(icone).as_uri()))
+                botoes = self._xml_acoes(acoes or [], chave, app)
                 doc = XmlDocument()
                 doc.load_xml(
                     '<toast launch="%s" activationType="protocol">'
                     '<visual><binding template="ToastGeneric">'
                     '<text>%s</text><text>%s</text>'
                     '<text placement="attribution">%s</text>%s'
-                    '</binding></visual><audio silent="true"/></toast>'
+                    '</binding></visual>%s<audio silent="true"/></toast>'
                     % (_xml(endereco(chave, app)),
                        _xml((titulo or nome_app)[:120]),
-                       _xml((texto or "")[:400]), _xml(nome_app), imagem))
+                       _xml((texto or "")[:400]), _xml(nome_app), imagem,
+                       botoes))
                 t = ToastNotification(doc)
                 t.tag = etiqueta(chave)
                 t.group = GRUPO
                 t.suppress_popup = True
+                self._soltar(chave)
+                self._vivas[chave] = (t, None)
                 notif.show(t)
         except Exception as erro:
             log.warning("windows: notificacao (%s)", erro)
 
+    @staticmethod
+    def _xml_acoes(acoes, chave: str, app: str) -> str:
+        """
+        (03/out, relato dele: "marcar como lida nao faz nada" na Central)
+        Os botoes com ativacao "foreground" dependem de um evento que o
+        Windows NAO entrega a programa sem instalacao (sem COM registrado):
+        o clique se perdia. Agora TODO botao e um endereco "scrcpyf:" -- o
+        mesmo caminho do clique no corpo, que funciona: o Windows abre o
+        scrcpy-f, que repassa o pedido ao que ja esta aberto. Por esse
+        caminho o Windows nao manda texto digitado: o "responder" vira um
+        botao que abre a caixa de resposta no proprio scrcpy-f.
+        """
+        partes = []
+        resposta = next((a for a in acoes if a[2]), None)
+        if resposta is not None:
+            partes.append('<action content="%s" arguments="%s" '
+                          'activationType="protocol"/>'
+                          % (_xml(resposta[1].lower()[:30]),
+                             _xml(endereco(chave, app, "responder",
+                                           resposta[0]))))
+        for indice, titulo, com_texto in acoes:
+            if not com_texto and len(partes) < 5:
+                partes.append('<action content="%s" arguments="%s" '
+                              'activationType="protocol"/>'
+                              % (_xml(titulo.lower()[:30]),
+                                 _xml(endereco(chave, app, "acao", indice))))
+        return "<actions>%s</actions>" % "".join(partes) if partes else ""
+
+    def _soltar(self, chave: str) -> None:
+        viva = self._vivas.pop(chave, None)
+        if viva is not None and viva[1] is not None:
+            try:
+                viva[0].remove_activated(viva[1])
+            except Exception:
+                pass
+
     def remover(self, chave: str) -> None:
+        with self._trava:
+            self._soltar(chave)
         try:
             from winrt.windows.ui.notifications import ToastNotificationManager
             ToastNotificationManager.history.remove_grouped_tag_with_id(
@@ -170,6 +254,9 @@ class NotificacoesWindows:
             log.debug("windows: remover (%s)", erro)
 
     def limpar(self) -> None:
+        with self._trava:
+            for chave in list(self._vivas):
+                self._soltar(chave)
         try:
             from winrt.windows.ui.notifications import ToastNotificationManager
             ToastNotificationManager.history.clear_with_id(AUMID)
@@ -243,7 +330,9 @@ class PlayerWindows:
                 s = self._criar()
                 if s is None:
                     return
-                ident = (m["pacote"], m["titulo"], m["artista"], m["album"])
+                # (02/out) a imagem entra: a capa chega depois do titulo
+                ident = (m["pacote"], m["titulo"], m["artista"], m["album"],
+                         str(icone))
                 if ident != self._mostrado:
                     du = s.display_updater
                     du.type = MediaPlaybackType.MUSIC
@@ -251,14 +340,24 @@ class PlayerWindows:
                     du.music_properties.artist = m["artista"] or ""
                     du.music_properties.album_title = m["album"] or ""
                     if icone is not None and Path(icone).exists():
+                        # (02/out, testado) Pelo ARQUIVO (StorageFile): pelo
+                        # endereco file:// o Windows deixava a imagem vazia.
                         try:
-                            from winrt.windows.foundation import Uri
+                            import asyncio
+                            from winrt.windows.storage import StorageFile
                             from winrt.windows.storage.streams import \
                                 RandomAccessStreamReference
+
+                            async def abrir(caminho):
+                                return await StorageFile \
+                                    .get_file_from_path_async(caminho)
+                            arquivo = asyncio.run(abrir(
+                                str(Path(icone).resolve())))
                             du.thumbnail = RandomAccessStreamReference \
-                                .create_from_uri(Uri(Path(icone).as_uri()))
-                        except Exception:
-                            pass
+                                .create_from_file(arquivo)
+                        except Exception as erro:
+                            log.warning("windows: imagem do player (%s)",
+                                        erro)
                     du.update()
                     s.is_enabled = True
                     self._mostrado = ident

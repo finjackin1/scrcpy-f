@@ -45,6 +45,44 @@ def garantir_saida() -> None:
                 pass
 
 
+def ciente_de_escala() -> str:
+    """
+    (03/out/2026) O programa passa a saber da escala do Windows (125%, 150%):
+    antes o Windows esticava a janela inteira como uma foto e ela saia
+    borrada. Agora o Tk desenha nitido no tamanho certo -- a letra cresce
+    sozinha (ela e em pontos) e as medidas crescem pelo `estudio.px`, que ja
+    multiplica pelo DPI.
+
+    "SISTEMA", nao "por monitor": o Tk nao redesenha ao trocar de monitor.
+    Num segundo monitor com outra escala o Windows estica como antes. Quem
+    precisa de pixel real (vigia da borda, faixa, janela do scrcpy) ja troca
+    o modo na propria thread e nao muda nada.
+
+    Precisa rodar ANTES de qualquer janela e antes do import do `estudio`
+    (ele le o DPI no import). Devolve o modo que pegou, para o log.
+    """
+    if sys.platform != "win32":
+        return "fora do windows"
+    try:
+        u = ctypes.windll.user32
+        u.SetProcessDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+        if u.SetProcessDpiAwarenessContext(ctypes.c_void_p(-2)):  # SYSTEM_AWARE
+            return "sistema"
+    except Exception:
+        pass
+    try:
+        if ctypes.windll.shcore.SetProcessDpiAwareness(1) == 0:  # Windows 8.1
+            return "sistema (8.1)"
+    except Exception:
+        pass
+    try:
+        if ctypes.windll.user32.SetProcessDPIAware():           # Windows 7
+            return "sistema (7)"
+    except Exception:
+        pass
+    return "sem escala (o Windows estica)"
+
+
 def instancia_unica() -> bool:
     """
     True se esta e a unica instancia; False se ja havia outra.
@@ -193,9 +231,16 @@ def identidade_do_programa() -> bool:
         return False
 
 
+# (07/out/2026, pedido dele: "padronizar") Com a janela de pe, os avisos e as
+# perguntas usam a CAIXA DA CASA (a janela registra aqui uma funcao
+# caixa(mensagem, titulo, botoes, ao_responder), chamavel de QUALQUER thread).
+# Sem ela (o programa abrindo ou saindo), a caixa do Windows de sempre.
+CAIXA = None
+
+
 def avisar(mensagem: str, titulo: str = "scrcpy-f", esperar: bool = False) -> None:
     """
-    Uma caixa de aviso do proprio Windows.
+    Uma caixa de aviso: a da casa (ver CAIXA) ou a do proprio Windows.
 
     Por padrao vai em thread separada, porque a caixa e MODAL: ela segura quem
     a chamou ate alguem clicar em OK, e travar o laco do programa deixaria a
@@ -213,6 +258,12 @@ def avisar(mensagem: str, titulo: str = "scrcpy-f", esperar: bool = False) -> No
         except Exception:
             log.warning("nao consegui mostrar o aviso: %s", mensagem)
 
+    if CAIXA is not None and not esperar:
+        try:
+            CAIXA(mensagem, titulo, ("ok",), None)
+            return
+        except Exception:
+            log.exception("caixa da casa")
     if esperar:
         mostrar()
         return
@@ -221,9 +272,24 @@ def avisar(mensagem: str, titulo: str = "scrcpy-f", esperar: bool = False) -> No
 
 def perguntar(mensagem: str, titulo: str = "scrcpy-f") -> bool:
     """
-    (r167) Caixa Sim/Nao do Windows, na frente de tudo. BLOQUEIA quem chama:
-    so usar fora da thread da janela. Sem Windows (ou falhou) = Nao.
+    (r167) Caixa Sim/Nao, na frente de tudo. BLOQUEIA quem chama: so usar
+    fora da thread da janela. Sem Windows (ou falhou) = Nao. (07/out) Com a
+    janela de pe, a caixa da casa (a thread espera a resposta).
     """
+    if CAIXA is not None and \
+            threading.current_thread() is not threading.main_thread():
+        resposta = {"sim": False}
+        pronto = threading.Event()
+
+        def respondeu(botao):
+            resposta["sim"] = botao == "sim"
+            pronto.set()
+        try:
+            CAIXA(mensagem, titulo, ("sim", "não"), respondeu)
+            pronto.wait()
+            return resposta["sim"]
+        except Exception:
+            log.exception("caixa da casa")
     try:
         # 0x4 Sim/Nao, 0x20 interrogacao, 0x10000 foco, 0x40000 na frente
         r = ctypes.windll.user32.MessageBoxW(

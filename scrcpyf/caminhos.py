@@ -21,12 +21,34 @@ def empacotado() -> bool:
     return getattr(sys, "frozen", False)
 
 
+_PASTA: Path | None = None
+_CRIADAS: set = set()
+
+
 def pasta_do_programa() -> Path:
-    """A pasta onde o programa mora."""
-    if empacotado():
-        return Path(sys.executable).resolve().parent
-    # ...\scrcpy-f\scrcpyf\caminhos.py -> ...\scrcpy-f
-    return Path(__file__).resolve().parent.parent
+    """A pasta onde o programa mora. (08/out, otimizacao) Calculada uma vez:
+    o `resolve` vai ao disco e isto e chamado a cada icone."""
+    global _PASTA
+    if _PASTA is None:
+        if empacotado():
+            _PASTA = Path(sys.executable).resolve().parent
+        else:
+            # ...\scrcpy-f\scrcpyf\caminhos.py -> ...\scrcpy-f
+            _PASTA = Path(__file__).resolve().parent.parent
+    return _PASTA
+
+
+def garantir_pasta(pasta: Path, pais: bool = False) -> bool:
+    """(08/out) Cria a pasta UMA vez por execucao (antes, um mkdir a cada
+    chamada -- a cada icone). False se nao deu."""
+    if pasta in _CRIADAS:
+        return True
+    try:
+        pasta.mkdir(parents=pais, exist_ok=True)
+    except Exception:
+        return False
+    _CRIADAS.add(pasta)
+    return True
 
 
 def arquivo(nome: str) -> Path:
@@ -58,10 +80,7 @@ def pasta_dados() -> Path:
     if empacotado():
         return pasta_interna()
     pasta = pasta_do_programa() / "dados"
-    try:
-        pasta.mkdir(exist_ok=True)
-    except Exception:
-        pass
+    garantir_pasta(pasta)
     return pasta
 
 
@@ -112,10 +131,7 @@ def pasta_relatorios() -> Path:
     mostra na versao publicada); em codigo, ao lado do programa, como sempre.
     """
     pasta = pasta_interna() / "relatorios"
-    try:
-        pasta.mkdir(exist_ok=True)
-    except Exception:
-        pass
+    garantir_pasta(pasta)
     return pasta
 
 

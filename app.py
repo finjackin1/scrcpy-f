@@ -21,6 +21,7 @@ from scrcpyf import VERSAO, sistema
 # `sys.stderr` valem None, e biblioteca que imprime na hora do import
 # levantaria excecao aqui.
 sistema.garantir_saida()
+MODO_ESCALA = sistema.ciente_de_escala()   # antes do estudio e de qualquer janela
 
 from scrcpyf import caminhos  # noqa: E402  (depois do garantir_saida)
 from scrcpyf.bandeja import Bandeja  # noqa: E402
@@ -97,9 +98,11 @@ def main() -> int:
     registro = Registro(caminhos.pasta_relatorios() / ARQUIVO_DE_LOG, VERSAO)
     registro.abrir()
     registro.capturar_erros()           # (r165) erro escondido vai pro log
+    registro.linha("escala do windows: %s" % MODO_ESCALA)
 
+    # (08/out, pedido dele) sem atalhos de fabrica: o programa nasce sem
+    # nenhum e nao poe de volta os que a pessoa tirou
     programa = Programa(registro)
-    _atalhos_de_fabrica(programa)
     registro.anotar_config(programa.config)
     if programa.config.ilegivel:
         registro.linha("config.json ILEGIVEL: rodando com o de fabrica, "
@@ -215,24 +218,6 @@ def _abrir_janela(programa, motor, registro):
         registro.linha("janela indisponivel: %s -- seguindo so com a bandeja"
                        % erro)
         return None
-
-
-def _atalhos_de_fabrica(programa) -> None:
-    """
-    Os numeros da lista de modos (1 e 2) sao os atalhos Ctrl+Alt+1 e
-    Ctrl+Alt+2. Quem ainda nao tem nenhum atalho ganha esses; quem ja montou
-    os seus fica como esta.
-    """
-    from scrcpyf import atalhos
-    cfg = programa.config
-    if atalhos.guardados(cfg):
-        return
-    for acao, teclas in atalhos.DE_FABRICA.items():
-        cfg.atalhos[acao] = teclas
-    if not cfg.ilegivel:
-        cfg.gravar()
-    programa.anotar("atalhos de fabrica: %s" % ", ".join(
-        "%s=%s" % par for par in atalhos.DE_FABRICA.items()))
 
 
 if __name__ == "__main__":

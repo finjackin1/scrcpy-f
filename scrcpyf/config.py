@@ -60,6 +60,8 @@ OPCOES_DE_FABRICA = {
     # (r171) De fabrica LIGADA (pedido dele, 25/set/2026: na primeira vez,
     # so notificacoes e mostrar a janela ligadas; o resto desligado).
     "abrir_janela_ao_iniciar": True,
+    # (08/out, pedido dele) copiar/colar entre PC e celular, de fabrica ligado
+    "area_compartilhada": True,
     # Avisos do Windows ao ligar, desligar e cair (pedido dele, 20/set/2026:
     # opcao para ligar e desligar as notificacoes).
     "notificacoes": True,
@@ -200,6 +202,12 @@ class Config:
         # (valem para todos), "por_app" {pacote: {"nivel", "som"}} e "nomes"
         # {pacote: nome} -- o nome que o atalho de um app mostra.
         self.apps: dict = dict(apps or {})
+        # (09/out) o "tamanho nos apps" (dpi) ia para apps["tamanho"], a
+        # mesma chave do tamanho dos icones da lista (p/m/g): agora "escala"
+        if self.apps.get("tamanho") in ("menor", "maior", "bem_maior"):
+            self.apps["escala"] = self.apps.pop("tamanho")
+        elif self.apps.get("tamanho") == "normal":
+            self.apps.pop("tamanho")
         # QUALIDADE UNICA (23/set/2026): ver `qualidade.py`, fim do arquivo.
         from . import qualidade as _q
         base_q = _q.qualidade_de_fabrica()
@@ -300,6 +308,10 @@ class Config:
 
         config = cls._dos_arquivos_antigos()
         config.novo = True
+        # (07/out, pedido dele) primeiro uso: som no PC em todos os modos
+        # (espelhar e extensao ja nascem assim; apps nascia no celular).
+        # Qualidade: a "equilibrado" de cada conexao (ver qualidade.py).
+        config.apps.setdefault("onde", "pc")
         config.gravar()
         return config
 
@@ -503,6 +515,32 @@ class Config:
     def definir_opcao(self, nome: str, ligado: bool) -> bool:
         """Grava na hora, nao ao fechar."""
         self.opcoes[nome] = bool(ligado)
+        return self.gravar()
+
+    # (07/out, pedido dele) OS INDICADORES DO RODAPE (som e conexao) nao
+    # respondem ao clique de fabrica; em OPCOES > geral cada gesto (clique,
+    # segurar, rodinha) pode ganhar uma funcao DO PROPRIO indicador.
+    # Guardado em opcoes["indicadores"] = {"som": {"clique": "trocar"}, ...}.
+
+    def gesto(self, indicador: str, gesto: str) -> str:
+        tudo = self.opcoes.get("indicadores") or {}
+        return str((tudo.get(indicador) or {}).get(gesto) or "")
+
+    def definir_gesto(self, indicador: str, gesto: str, funcao: str) -> bool:
+        tudo = dict(self.opcoes.get("indicadores") or {})
+        este = dict(tudo.get(indicador) or {})
+        if funcao:
+            este[gesto] = funcao
+        else:
+            este.pop(gesto, None)
+        if este:
+            tudo[indicador] = este
+        else:
+            tudo.pop(indicador, None)
+        if tudo:
+            self.opcoes["indicadores"] = tudo
+        else:
+            self.opcoes.pop("indicadores", None)
         return self.gravar()
 
     def definir_atalho(self, acao: str, teclas: str) -> bool:

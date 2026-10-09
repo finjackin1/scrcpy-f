@@ -1,3 +1,3 @@
 """scrcpy-f: espelhamento e audio do celular Android pelo PC."""
 
-VERSAO = "1.3.0"
+VERSAO = "1.4.0"

@@ -98,7 +98,9 @@ class Resultado:
 def _modelo(adb, serial: str) -> str:
     saida = celular._rodar([adb, "-s", serial, "shell", "getprop",
                             "ro.product.model"], espera=8)
-    return saida.strip().splitlines()[0].strip() if saida.strip() else ""
+    linhas = [x.strip() for x in saida.splitlines()
+              if x.strip() and not x.strip().lower().startswith("error:")]
+    return linhas[0] if linhas else ""
 
 
 def _endereco_por_wlan(adb, serial: str) -> str:
@@ -161,61 +163,122 @@ def conectar_pelo_cabo(adb, avisar, parar: threading.Event) -> Resultado:
                 avisar("Esperando o celular pelo cabo... %ds" % passados)
             time.sleep(0.8)
 
-    modelo = _modelo(adb, serial) or "celular"
+    modelo, id_cabo = _identidade(adb, serial)
+    modelo = modelo or "celular"
     # (r192) SEM PARAR O ADB: o `tcpip` reinicia o adb DENTRO do celular e
-    # derruba tudo que esta aberto nele. Se este celular ja tem conexao sem
-    # fio de pe, nao ha nada a abrir.
+    # derruba tudo que esta aberto nele. Se este celular (mesmo ro.serialno)
+    # ja tem conexao sem fio de pe E ela responde, nao ha nada a abrir.
     for s, estado in _seriais(adb):
         if estado == "device" and not _pelo_cabo(s) and \
-                _modelo(adb, s) == modelo:
+                _identidade(adb, s)[1] == id_cabo and _responde(adb, s):
             ip = s.split(":")[0] if "._tcp" not in s.lower() else \
                 celular.endereco_na_rede(adb, s)
-            return Resultado(True, "Pronto: %s já estava conectado sem fio."
-                             % modelo, modelo=modelo, endereco=ip)
+            return Resultado(True, "Pronto: %s já está conectado sem fio. "
+                             "Pode tirar o cabo." % modelo, modelo=modelo,
+                             endereco=ip, serial=s)
     avisar("%s encontrado. Abrindo a conexão sem fio..." % modelo)
-    celular._rodar([adb, "-s", serial, "tcpip", str(PORTA_SEM_FIO)],
-                   espera=15)
-    time.sleep(1.5)
     if parar.is_set():
         return Resultado(False, "Cancelado.")
-
+    # (07/out) a mesma receita do cabo que abre sozinho (espera o adb do
+    # celular voltar, insiste e confere a resposta)
+    ip, como = abrir_sem_fio(adb, serial, True, avisar, parar)
+    log.info("cabo -> sem fio: %s (%s)", ip or "nao", como)
+    if parar.is_set():
+        return Resultado(False, "Cancelado.")
+    if ip:
+        return Resultado(
+            True, "Pronto: %s conectado sem fio (%s). Pode tirar o cabo."
+            % (modelo, ip), modelo=modelo, endereco=ip,
+            serial="%s:%d" % (ip, PORTA_SEM_FIO))
     # (limpeza 01/out) PREFERINDO O CABO, o sem fio e um extra: se ele nao
     # ficar pronto, o celular entra em uso pelo cabo mesmo (antes falhava
     # sem Wi-Fi -- em aberto desde o r194).
-    def so_pelo_cabo(motivo: str) -> Resultado | None:
-        if celular.PREFERENCIA != "cabo":
-            return None
+    if celular.PREFERENCIA == "cabo":
         return Resultado(True, "Pronto: %s em uso pelo cabo (o sem fio não "
-                         "ficou pronto: %s)." % (modelo, motivo),
+                         "ficou pronto: %s)." % (modelo, como),
                          modelo=modelo, serial=serial)
-
-    avisar("Procurando o endereço do celular na rede...")
-    ip = ""
-    for _vez in range(5):
-        ip = _endereco_por_wlan(adb, serial)
-        if ip:
-            break
-        time.sleep(0.8)
-    if not ip:
-        return so_pelo_cabo("sem Wi-Fi") or Resultado(
+    if como == "celular sem Wi-Fi":
+        return Resultado(
             False, "O %s não está no Wi-Fi (não achei o endereço dele na "
             "rede). Ligue o Wi-Fi do celular, na mesma rede do PC, e tente "
             "de novo." % modelo, modelo=modelo)
+    return Resultado(
+        False, "Achei o %s pelo cabo, mas a conexão sem fio não respondeu. "
+        "Confira se ele está na MESMA rede Wi-Fi do PC (não em rede de "
+        "convidados, sem VPN) e tente de novo." % modelo, modelo=modelo)
 
+
+ESPERA_SEM_FIO_S = 15      # (07/out) depois do tcpip, quanto insistir
+
+
+def _responde(adb, alvo: str) -> bool:
+    """O celular RESPONDE por `alvo` (um comando de verdade, nao so a
+    conexao aberta: o adb as vezes lista uma conexao morta)."""
+    saida = celular._rodar([adb, "-s", alvo, "shell", "echo ok"], espera=6)
+    return "ok" in saida.split()
+
+
+def _conectar(adb, alvo: str) -> bool:
+    saida = celular._rodar([adb, "connect", alvo], espera=8).lower()
+    return "connected" in saida and "cannot" not in saida and \
+        "failed" not in saida
+
+
+def abrir_sem_fio(adb, serial: str, pode_reiniciar: bool, avisar=None,
+                  parar: threading.Event | None = None) -> tuple[str, str]:
+    """
+    (03/out, pedido dele depois do teste do amigo) O CABO ABRE O SEM FIO
+    SOZINHO: com o celular `serial` no cabo, poe a conexao sem fio de pe.
+    Primeiro so o `connect` (a porta pode ja estar aberta desde a ultima
+    vez -- nao derruba nada); o `tcpip` reinicia o adb DENTRO do celular e
+    derruba o que roda nele, entao so com `pode_reiniciar`.
+
+    (07/out, relato dele: "tenho que plugar, tirar, plugar de novo e clicar")
+    O `connect` vinha cedo demais: o adb do celular leva uns segundos para
+    voltar depois do `tcpip` e as 3 tentativas (~4 s) acabavam antes. Agora:
+    espera o cabo voltar, insiste por ESPERA_SEM_FIO_S e so da por pronto
+    quando o celular RESPONDE pelo sem fio.
+    Devolve (ip, como): ip vazio = nao ficou de pe; `como` vai para o log.
+    """
+    avisar = avisar or (lambda _t: None)
+    ip = ""
+    for _vez in range(4):                 # o Wi-Fi pode estar acordando
+        ip = _endereco_por_wlan(adb, serial)
+        if ip or (parar is not None and parar.is_set()):
+            break
+        time.sleep(0.8)
+    if not ip:
+        return "", "celular sem Wi-Fi"
+    alvo = "%s:%d" % (ip, PORTA_SEM_FIO)
+    if _conectar(adb, alvo) and _responde(adb, alvo):
+        return ip, "porta ja estava aberta"
+    if not pode_reiniciar:
+        return "", "algo no ar pelo cabo; tcpip ficou para depois"
+    avisar("Abrindo a conexão sem fio...")
+    # uma conexao morta para o mesmo endereco atrapalha o connect novo
+    celular._rodar([adb, "disconnect", alvo], espera=5)
+    celular._rodar([adb, "-s", serial, "tcpip", str(PORTA_SEM_FIO)],
+                   espera=15)
+    inicio = time.monotonic()
+    # o adb do celular reinicia: o cabo some e volta (ate ~8 s)
+    time.sleep(1.5)
+    while time.monotonic() - inicio < 8:
+        if parar is not None and parar.is_set():
+            return "", "cancelado"
+        if any(s == serial and e == "device" for s, e in _seriais(adb)):
+            break
+        time.sleep(0.5)
     avisar("Testando a conexão sem fio com %s..." % ip)
-    for _vez in range(3):
-        saida = celular._rodar([adb, "connect", "%s:%d" % (ip, PORTA_SEM_FIO)],
-                               espera=10)
-        if "connected" in saida.lower() and "cannot" not in saida.lower():
-            return Resultado(
-                True, "Pronto: %s conectado sem fio (%s). Pode tirar o cabo."
-                % (modelo, ip), modelo=modelo, endereco=ip)
+    vez = 0
+    while time.monotonic() - inicio < 8 + ESPERA_SEM_FIO_S:
+        if parar is not None and parar.is_set():
+            return "", "cancelado"
+        vez += 1
+        if _conectar(adb, alvo) and _responde(adb, alvo):
+            return ip, "porta aberta agora (%d tentativa%s)" % (
+                vez, "" if vez == 1 else "s")
         time.sleep(1.0)
-    return so_pelo_cabo("não respondeu em %s" % ip) or Resultado(
-        False, "Achei o %s pelo cabo, mas a conexão sem fio não respondeu "
-        "em %s. Confira se ele está na MESMA rede Wi-Fi do PC (não em rede "
-        "de convidados, sem VPN) e tente de novo." % (modelo, ip),
-        modelo=modelo, endereco=ip)
+    return "", "nao respondeu em %s (rede diferente do PC?)" % ip
 
 
 def parear_por_codigo(adb, endereco: str, codigo: str, avisar,
@@ -315,7 +378,9 @@ def _identidade(adb, serial: str) -> tuple[str, str]:
                             "getprop ro.product.model; getprop ro.serialno"],
                            espera=8)
     linhas = [x.strip() for x in saida.replace("\r", "").split("\n")]
-    linhas = [x for x in linhas if x]
+    # (02/out) Conexao caindo: o adb responde "error: closed" e isso virava
+    # o nome do celular na lista (log do amigo).
+    linhas = [x for x in linhas if x and not x.lower().startswith("error:")]
     return (linhas[0] if linhas else ""), (linhas[1] if len(linhas) > 1 else "")
 
 

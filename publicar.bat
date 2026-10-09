@@ -11,8 +11,9 @@ rem programa abre em OPCOES pedindo a pasta dele.
 rem
 rem O QUE SAI
 rem ---------
-rem     dist\scrcpy-f\       <- SEM a versao no nome (pedido dele, 23/set/2026:
-rem                               ele extrai sempre no mesmo lugar)
+rem     scrcpy-f\  (DENTRO do zip; montada em build\pacote e apagada)
+rem                <- SEM a versao no nome (pedido dele, 23/set/2026:
+rem                   ele extrai sempre no mesmo lugar)
 rem         scrcpy-f.exe              <- o programa
 rem         _internal\                <- Python, Pillow, pystray (OCULTA; os
 rem                                      relatorios tambem moram aqui)
@@ -55,7 +56,12 @@ if not defined VER (
 )
 
 set "SAIDA=%~dp0dist"
-set "BRUTO=%SAIDA%\scrcpy-f"
+rem (02/out/2026, pedido dele) Em dist so o ZIP: a pasta e montada em build\
+rem e apagada depois de compactada.
+set "MONTAGEM=%~dp0build\pacote"
+set "BRUTO=%MONTAGEM%\scrcpy-f"
+if not exist "%SAIDA%" mkdir "%SAIDA%"
+if exist "%SAIDA%\scrcpy-f" rmdir /s /q "%SAIDA%\scrcpy-f"
 set "PACOTE=%BRUTO%"
 set "ZIP=%SAIDA%\scrcpy-f-%VER%.zip"
 
@@ -92,7 +98,7 @@ if errorlevel 1 (
 rem --------------------------------------------------------------------------
 echo [3/6] Compilando... ^(demora um pouco, e normal^)
 if exist "%BRUTO%" rmdir /s /q "%BRUTO%"
-python -m PyInstaller --noconfirm --clean --distpath "%SAIDA%" --workpath "%~dp0build" "publicacao\scrcpy-f.spec" >>"%LOG%" 2>&1
+python -m PyInstaller --noconfirm --clean --distpath "%MONTAGEM%" --workpath "%~dp0build" "publicacao\scrcpy-f.spec" >>"%LOG%" 2>&1
 if errorlevel 1 goto :erro_compila
 if not exist "%BRUTO%\scrcpy-f.exe" goto :erro_compila
 
@@ -127,10 +133,9 @@ if errorlevel 1 (
   echo        %PACOTE%
   goto :fim
 )
-rem So DEPOIS do zip: o Compress-Archive pula pasta oculta, e o pacote sairia
-rem sem o _internal. Na pasta local ela ja fica escondida; em quem recebe, o
-rem proprio programa esconde ao abrir (caminhos.ocultar_pasta_interna).
-if exist "%PACOTE%\_internal" attrib +h "%PACOTE%\_internal" >nul
+rem Em quem recebe, o proprio programa esconde o _internal ao abrir
+rem (caminhos.ocultar_pasta_interna). A pasta montada sai daqui.
+rmdir /s /q "%BRUTO%"
 
 rem --------------------------------------------------------------------------
 echo [6/6] Conferindo o tamanho...
@@ -148,8 +153,8 @@ echo    Quem receber: extrair o zip, abrir a pasta e ler o LEIA-ME.txt.
 echo    Na primeira abertura o programa pede a pasta do scrcpy; o celular
 echo    se conecta no item PAREAR da janela.
 echo.
-echo    ANTES DE MANDAR, teste voce mesmo o scrcpy-f.exe da pasta
-echo    dist\scrcpy-f ^(feche o scrcpy-f normal antes^):
+echo    ANTES DE MANDAR, extraia o zip e teste voce mesmo o scrcpy-f.exe
+echo    ^(feche o scrcpy-f normal antes^):
 echo      1. o scrcpy-f.exe abre a janela nova e o icone ao lado do relogio?
 echo      2. em OPCOES a pasta do scrcpy aparece como certa?
 echo      3. espelhar ou a extensao ligaram?

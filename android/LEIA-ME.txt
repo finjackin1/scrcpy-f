@@ -28,8 +28,27 @@ celular (o mesmo que arrastar na barra: IStatusBarService.onNotificationClear)
 "cmd notification list". Ler as notificacoes o PC faz pelo "cmd notification"
 (a API de listar pede uma permissao que o shell nao tem). Monta igual ao
 Tela.java (abaixo); o JDK portatil e o dex-tools baixados para a pasta
-temporaria da sessao bastam.
+temporaria da sessao bastam. O MESMO jar leva o Midia.java (player: le e
+controla as sessoes de midia; desde 02/out/2026 manda tambem a capa do
+album, "A <pacote> <chave> <jpeg base64>"). Montar os dois juntos:
+javac --release 8 -d cls Notif.java Midia.java.
+
+Ouvinte.java (03/out/2026): vai no MESMO scrcpyf-notif.jar. O shell se
+registra como OUVINTE de notificacoes (como a barra do Android) e manda as
+acoes e imagens de cada uma; obedece "apertar a acao" (com o texto da
+resposta) e "tocar no corpo" (abrir o item exato). Ele usa classes do
+Android direto: as CASCAS em stubs\ existem so para compilar (nao vao no
+jar). Montar os tres juntos:
+  javac --release 8 -d stubcls (todos os .java de stubs\)
+  javac --release 8 -cp stubcls -d cls Notif.java Midia.java Ouvinte.java
+  e o dx como abaixo.
 
 Como remontar: javac --release 8 -d cls Tela.java (pasta scrcpyf/) e
 java -jar dx-30.0.2.jar --dex --min-sdk-version=26 --output=classes.dex cls
 (o dx vem no dex-tools 2.4 do dex2jar, no GitHub); zipar o classes.dex.
+
+Area.java (08/out/2026): vai no MESMO scrcpyf-notif.jar. Poe um texto na area
+de transferencia do celular (o do PC, copiado agora): app_process /
+scrcpyf.Area <texto em base64 UTF-8> -> "ok". So reflexao (sem cascas).
+Montar os quatro juntos:
+  javac --release 8 -cp stubcls -d cls Notif.java Midia.java Ouvinte.java Area.java

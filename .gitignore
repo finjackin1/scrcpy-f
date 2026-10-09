@@ -54,3 +54,9 @@ docs/historico/
 *.zip
 *.bak
 .lixeira-fmcp/
+
+# log de teste de terceiros (tem caminho de usuario)
+log_teste/
+
+# prints de referencia dele (tela do celular dele; repo publico)
+imgex/

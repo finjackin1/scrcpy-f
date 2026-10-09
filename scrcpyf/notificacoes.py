@@ -44,7 +44,8 @@ SEM_JANELA = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 MARCA = "scrcpyf_notif"
 # Mata no celular as conversas desta parte (as de agora e sobras). Os
 # colchetes fazem o proprio pkill nao casar com o padrao.
-MATAR = ("pkill -f 'scrcpyf_noti[f]' ; pkill -f 'scrcpyf.Midi[a]' ; true")
+MATAR = ("pkill -f 'scrcpyf_noti[f]' ; pkill -f 'scrcpyf.Midi[a]' ; "
+         "pkill -f 'scrcpyf.Ouvint[e]' ; true")
 JAR_NO_CELULAR = "/data/local/tmp/scrcpyf-notif.jar"
 HISTORICO_HORAS = 24
 HISTORICO_MAX = 500
@@ -64,20 +65,34 @@ SERVIDOR = (
     "g(){ cmd notification get \"$1\" </dev/null | sed -n "
     "-e '/^NotificationRecord(/p' -e '/^  uid=/p' "
     "-e '/^  flags=/p' -e '/^    when=/p' -e '/^    contentIntent=/p' "
+    # (02/out) a cor do app, o "colorida" e a ordem do Android (rnk)
+    "-e '/^    color=/p' -e '/^  mColorized=/p' -e '/^  mGlobalSortKey=/p' "
     "-e '/^    actions={/,/^      }/p' "
     "-e '/^    extras={/,/^    }/p'; }; "
-    "while read c a; do case $c in "
+    # (07/out, achado no WhatsApp) a chave pode ter QUEBRA DE LINHA (o tag
+    # da conversa termina em "\n"): ela vem escapada ("\\n"), `read -r` nao
+    # come a barra e o `printf %b` devolve a quebra antes do `get`
+    "while read -r c a; do case $c in "
     "l) cmd notification list </dev/null;; "
-    "g) echo \"@k $a\"; g \"$a\";; "
+    # (o `echo` do celular tambem interpreta o "\n": printf '%s' nao)
+    "g) printf '@k %%s\\n' \"$a\"; g \"$(printf %%b \"$a\")\";; "
     # G: varias chaves numa ida so (uma por linha, "." no fim)
-    "G) while read k; do if [ \"$k\" = . ]; then break; fi; "
-    "echo \"@k $k\"; g \"$k\"; done;; "
+    "G) while read -r k; do if [ \"$k\" = . ]; then break; fi; "
+    "printf '@k %%s\\n' \"$k\"; g \"$(printf %%b \"$k\")\"; done;; "
     "b) dumpsys notification | grep 'AppSettings:' | grep 'importance=NONE';; "
     # p: a tela de "configuracoes de notificacao" do proprio app, se tiver
     "p) cmd package query-activities --brief -a android.intent.action.MAIN "
     "-c android.intent.category.NOTIFICATION_PREFERENCES \"$a\" </dev/null;; "
     # t: o estado da chamada (0 nada, 1 tocando, 2 em andamento)
     "t) dumpsys telephony.registry </dev/null | grep -m1 mCallState;; "
+    # (02/out) nao perturbe: z le (0 desligado; 1, 2, 3 ligado), Z liga/desliga
+    "z) settings get global zen_mode </dev/null;; "
+    "Z) cmd notification set_dnd \"$a\" </dev/null;; "
+    # (02/out) adiar: "s <ms> <chave>" (volta sozinha depois)
+    # (sem `set --`: a chave tem colchetes e o shell os expandiria)
+    # (o texto passa por "% MARCA": %%%% vira o %% do shell)
+    "s) cmd notification snooze --for \"${a%%%% *}\" "
+    "\"$(printf %%b \"${a#* }\")\" </dev/null;; "
     "esac; echo @fim; done" % MARCA)
 EVENTOS = ("logcat -b events -v epoch -T 1 -s notification_enqueue:I "
            "notification_cancel:I notification_cancel_all:I %s:S" % MARCA)
@@ -97,7 +112,9 @@ class Notif:
 
     __slots__ = ("chave", "pacote", "usuario", "quando", "titulo", "texto",
                  "subtexto", "flags", "sdk", "alvo", "canal", "acoes",
-                 "categoria", "modelo")
+                 "categoria", "modelo", "curto", "linhas", "mensagens",
+                 "conversa", "progresso", "cronometro", "regressivo", "cor",
+                 "colorida", "importancia", "rank", "imagem", "resumo_txt")
 
     def __init__(self, chave: str, pacote: str, usuario: int, quando: int,
                  titulo: str, texto: str, subtexto: str, flags: set) -> None:
@@ -120,6 +137,23 @@ class Notif:
         self.acoes: list = []
         self.categoria = ""               # "msg", "call", "transport"...
         self.modelo = ""                  # MediaStyle, MessagingStyle...
+        # (02/out, "como no Android") O que o cartao mostra recolhido e
+        # aberto: `texto` e o inteiro (bigText), `curto` a linha de baixo do
+        # recolhido (android.text); a caixa (InboxStyle) e a conversa
+        # (MessagingStyle: [(remetente, texto, quando)]).
+        self.curto = ""
+        self.linhas: list = []
+        self.mensagens: list = []
+        self.conversa = ""                # titulo da conversa (grupo)
+        self.resumo_txt = ""              # summaryText (linha do aberto)
+        self.progresso = None             # (atual, maximo, indeterminado)
+        self.cronometro = False           # conta o tempo desde `quando`
+        self.regressivo = False           # ... ou ate `quando`
+        self.cor = ""                     # "#RRGGBB" do app, ou ""
+        self.colorida = False             # o cartao inteiro na cor do app
+        self.importancia = 3              # <= 2: silenciosa
+        self.rank = 1 << 30               # a ordem do Android (menor = antes)
+        self.imagem = False               # tem foto grande (so no celular)
 
     @property
     def app(self) -> str:
@@ -160,6 +194,34 @@ class Notif:
     def conteudo(self) -> tuple:
         return (self.titulo, self.texto, self.subtexto)
 
+    def aparencia(self) -> tuple:
+        """Tudo o que o cartao desenha (alem de `conteudo`): mudou = repinta.
+        Separado de `conteudo`, que decide aviso e historico -- um download
+        andando nao e notificacao nova."""
+        return (self.conteudo(), self.curto, tuple(self.linhas),
+                tuple(self.mensagens), self.conversa, self.resumo_txt,
+                self.progresso, self.cronometro, self.regressivo, self.cor,
+                self.colorida, self.imagem)
+
+    @property
+    def secao(self) -> int:
+        """Como o Android separa a lista: 0 conversas, 1 alertando,
+        2 silenciosas."""
+        if self.modelo == "MessagingStyle" and self.importancia >= 3:
+            return 0
+        return 2 if 0 < self.importancia <= 2 else 1
+
+    def texto_para_copiar(self) -> str:
+        partes = [self.conversa or self.titulo]
+        if self.mensagens:
+            partes += ["%s: %s" % (q, t) if q else t
+                       for q, t, _h in self.mensagens]
+        elif self.linhas:
+            partes += self.linhas
+        else:
+            partes.append(self.texto or self.subtexto)
+        return "\n".join(p for p in partes if p)
+
 
 # ---------------------------------------------------------------------------
 # Leitura do que o celular escreve
@@ -190,12 +252,25 @@ def ler_detalhe(chave: str, texto: str) -> Notif | None:
     acoes: list = []
     flags: set = set()
     extras: dict = {}
+    cor = ""
+    colorida = False
+    rank = 1 << 30
+    importancia = 3
     atual = None
     dentro = False
+    blocos = 0
     for linha in texto.replace("\r", "").split("\n"):
         if linha.startswith("    extras={"):
-            dentro = True
+            # (07/out, achado no WhatsApp: o cartao dizia "WhatsApp / Novas
+            # mensagens: 1") o 2o bloco de extras e o da VERSAO PUBLICA (a da
+            # tela de bloqueio): so o 1o, o da notificacao de verdade, conta
+            blocos += 1
+            dentro = blocos == 1
+            if not dentro:
+                atual = None
             continue
+        if blocos > 1 and linha.startswith("        "):
+            continue                     # linhas do bloco publico
         if dentro:
             if linha.startswith("    }"):
                 dentro = False
@@ -232,6 +307,19 @@ def ler_detalhe(chave: str, texto: str) -> Notif | None:
         if m:
             acoes.append((m.group(1), (m.group(2), m.group(3), m.group(4))))
             continue
+        m = re.match(r"^    color=0x([0-9a-fA-F]{8})", linha)
+        if m:
+            argb = int(m.group(1), 16)
+            if argb >> 24:                   # alfa 0 = "cor padrao"
+                cor = "#%06X" % (argb & 0xFFFFFF)
+            continue
+        if linha.startswith("  mColorized="):
+            colorida = linha.strip().endswith("true")
+            continue
+        m = re.search(r"^  mGlobalSortKey=.*rnk=0x([0-9a-fA-F]+)", linha)
+        if m:
+            rank = int(m.group(1), 16)
+            continue
         if linha.startswith("NotificationRecord("):
             m = re.search(r"Notification\(channel=([^ )]+)", linha)
             if m and m.group(1) != "null":
@@ -239,6 +327,9 @@ def ler_detalhe(chave: str, texto: str) -> Notif | None:
             m = re.search(r" category=(\w+)", linha)
             if m:
                 categoria = m.group(1)
+            m = re.search(r" importance=(-?\d+)", linha)
+            if m:
+                importancia = int(m.group(1))
     if not extras and not flags and not quando:
         return None
     titulo = _valor(extras.get("android.title", "")) or \
@@ -253,7 +344,86 @@ def ler_detalhe(chave: str, texto: str) -> Notif | None:
     n.acoes = acoes
     n.categoria = categoria
     n.modelo = _valor(extras.get("android.template", "")).rsplit("$", 1)[-1]
+    n.curto = _valor(extras.get("android.text", "")) or n.subtexto
+    n.linhas = _itens(extras.get("android.textLines", ""))
+    n.mensagens = [m for m in (_mensagem(x) for x in
+                               _itens(extras.get("android.messages", "")))
+                   if m is not None]
+    n.conversa = _valor(extras.get("android.conversationTitle", ""))
+    n.resumo_txt = _valor(extras.get("android.summaryText", ""))
+    maximo = _inteiro(extras.get("android.progressMax", ""))
+    indeterminado = _valor(extras.get("android.progressIndeterminate",
+                                      "")) == "true"
+    if maximo > 0 or indeterminado:
+        n.progresso = (_inteiro(extras.get("android.progress", "")), maximo,
+                       indeterminado)
+    n.cronometro = _valor(extras.get("android.showChronometer", "")) == "true"
+    n.regressivo = _valor(extras.get("android.chronometerCountDown",
+                                     "")) == "true"
+    n.imagem = bool(_valor(extras.get("android.picture", "")) or
+                    _valor(extras.get("android.pictureIcon", "")))
+    n.cor = cor
+    n.colorida = colorida and bool(cor)
+    n.importancia = importancia
+    n.rank = rank
     return n
+
+
+def _por_conversa(n, conversa) -> None:
+    """A conversa que o ouvinte leu (com quem mandou cada mensagem) no lugar
+    da do `cmd notification`."""
+    titulo, grupo, msgs = conversa
+    if not msgs:
+        return
+    n.mensagens = list(msgs)
+    if grupo:
+        n.conversa = titulo or n.conversa or n.titulo
+
+
+def _inteiro(bruto: str) -> int:
+    try:
+        return int(_valor(bruto) or 0)
+    except ValueError:
+        return 0
+
+
+def _itens(bruto: str) -> list:
+    """Um array dos extras ("CharSequence[] (3)" e as linhas "[0] ...")
+    -> os itens. Item que quebra linha continua na linha seguinte."""
+    itens: list = []
+    for linha in bruto.split("\n")[1:]:
+        m = re.match(r"^\s*\[(\d+)\] ?(.*)$", linha)
+        if m and int(m.group(1)) == len(itens):
+            itens.append(m.group(2))
+        elif itens:
+            itens[-1] += "\n" + linha.strip()
+    return [i.strip() for i in itens if i.strip()]
+
+
+# As chaves que o Bundle de uma mensagem pode ter (para achar onde o texto
+# termina: o texto pode ter virgula).
+_CHAVES_MSG = r"(?:extras|sender_person|sender|text|time|type|uri|" \
+              r"remote_input_history)"
+
+
+def _mensagem(item: str):
+    """'Bundle[{extras=..., sender=Ana, text=Oi, time=17909...}]' ->
+    (remetente, texto, quando) ou None."""
+    corpo = re.sub(r"^Bundle\[\{|\}\]$", "", item.strip())
+
+    def campo(nome):
+        m = re.search(r"(?:^|, )%s=(.*?)(?=, %s=|$)" % (nome, _CHAVES_MSG),
+                      corpo, re.S)
+        return m.group(1).strip() if m else ""
+    texto = campo("text")
+    if not texto or texto == "null":
+        return None
+    remetente = campo("sender")
+    try:
+        quando = int(campo("time") or 0)
+    except ValueError:
+        quando = 0
+    return ("" if remetente == "null" else remetente, texto, quando)
 
 
 # (01/out) CODIGO DE VERIFICACAO: 4 a 8 digitos (com hifen/espaco no meio)
@@ -370,6 +540,33 @@ def pacote_do_destino(destino: dict) -> str:
     return cmp.split("/")[0] if "/" in cmp else destino.get("pkg") or ""
 
 
+def juntar_chaves(linhas) -> list:
+    """(07/out, achado no WhatsApp: a conversa sumia e so ficava o resumo
+    "Novas mensagens: 1") As chaves do `cmd notification list`, uma por
+    linha -- mas o TAG pode ter quebra de linha (o WhatsApp termina o tag
+    da conversa em "\\n"), e a chave chega partida: "0|com.whatsapp|1|abc="
+    e "|10524". Os pedacos sao juntados com "\\n" ESCAPADO (barra + n): e a
+    forma interna da chave no programa (`real_da_chave` devolve a quebra)."""
+    saida, pedaco = [], ""
+    for bruta in linhas:
+        linha = bruta.rstrip("\r")
+        if pedaco:
+            pedaco = pedaco + "\\n" + linha
+        elif linha.strip():
+            pedaco = linha.strip()
+        else:
+            continue
+        if pedaco.count("|") >= 4:
+            saida.append(pedaco)
+            pedaco = ""
+    return saida
+
+
+def real_da_chave(chave: str) -> str:
+    """A chave como o Android a conhece (com a quebra de linha de volta)."""
+    return chave.replace("\\n", "\n")
+
+
 def _separar_por_chave(linhas: list[str]):
     """A resposta do "G" ("@k <chave>" e as linhas dela, repetido) ->
     [(chave, texto)]."""
@@ -471,6 +668,19 @@ class Central:
         self.midias_versao = 0
         self.chamada = None               # Notif da chamada TOCANDO, ou None
         self._player_fechado = None       # (pacote, quando) do x do player
+        self.capas: dict = {}             # pacote -> (chave, jpeg) (Midia)
+        self.zen = None                   # nao perturbe do celular
+        # (03/out) O OUVINTE (android\Ouvinte.java): por chave, as acoes do
+        # app ([(titulo, tem_texto, abre_tela)]), o toque ("a" abre tela) e
+        # as imagens (png do icone grande, jpeg da foto). Vazio = sem ouvinte
+        # (Android que nao deixa, ou caiu): tudo como antes.
+        self.ouvidas: dict = {}
+        self.ouvinte_ok = False
+        self.ouvinte_versao = 0
+        self._ouvinte_proc = None
+        self._ouv_trava = threading.Lock()
+        self._ouv_id = 0
+        self._ouv_espera: dict = {}       # id -> [Event, resultado]
         # (01/out) Ganchos do Windows (central_windows, pelo programa):
         # ao_chegar(n) / ao_sair(n) / ao_limpar() / ao_player(m) -- de outra
         # thread; erro neles nao derruba nada (`_ganchos`).
@@ -539,17 +749,24 @@ class Central:
             faxina.start()
             if esperar:
                 faxina.join(6)
-        midia, self._midia_proc = self._midia_proc, None
-        if midia is not None:
-            try:
-                midia.terminate()
-            except Exception:
-                pass
+        for nome in ("_midia_proc", "_ouvinte_proc"):
+            proc = getattr(self, nome)
+            setattr(self, nome, None)
+            if proc is not None:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+        self._ouvinte_respostas_soltas()
         with self._trava:
+            self.ouvidas = {}
+            self.ouvinte_ok = False
             mudou = bool(self.ativas) or bool(self.midias) or \
                 self.chamada is not None
             self.ativas = {}
             self.midias = []
+            self.capas = {}
+            self.zen = None
             self.chamada = None
             self._pronto = False
         if mudou:
@@ -600,6 +817,8 @@ class Central:
                          daemon=True, name="notif-eventos").start()
         threading.Thread(target=self._manter_midia, args=(serial, geracao),
                          daemon=True, name="notif-midia").start()
+        threading.Thread(target=self._manter_ouvinte, args=(serial, geracao),
+                         daemon=True, name="notif-ouvinte").start()
         self._trabalhar(geracao)
 
     # -- o player (01/out) ----------------------------------------------------
@@ -607,17 +826,23 @@ class Central:
     # midia quando algo muda e obedece "c <pacote> <acao> [ms]". Caiu =
     # sobe de novo (o player nao derruba as notificacoes).
 
+    _JAR_TRAVA = threading.Lock()
+
     def _por_jar(self, serial: str) -> bool:
-        if self._jar_pronto == serial:
+        # (03/out) Player e ouvinte sobem juntos: um so envia; o outro espera
+        # (senao um reescrevia o jar enquanto o outro o abria no celular).
+        with self._JAR_TRAVA:
+            if self._jar_pronto == serial:
+                return True
+            from pathlib import Path
+            jar = Path(caminhos.pasta_interna()) / "android" / \
+                "scrcpyf-notif.jar"
+            if not jar.exists():
+                return False
+            self._rodar([str(self._adb()), "-s", serial, "push", str(jar),
+                         JAR_NO_CELULAR], 20)
+            self._jar_pronto = serial
             return True
-        from pathlib import Path
-        jar = Path(caminhos.pasta_interna()) / "android" / "scrcpyf-notif.jar"
-        if not jar.exists():
-            return False
-        self._rodar([str(self._adb()), "-s", serial, "push", str(jar),
-                     JAR_NO_CELULAR], 20)
-        self._jar_pronto = serial
-        return True
 
     def _manter_midia(self, serial: str, geracao: int) -> None:
         falhas = 0
@@ -646,6 +871,8 @@ class Central:
                         self.anotar("player: no ar")
                 elif linha.startswith("M\t"):
                     linhas.append(linha)
+                elif linha.startswith("A\t"):
+                    self._chegou_capa(linha)
                 elif linha == "fim":
                     self._chegou_foto_midia(linhas)
                     linhas = []
@@ -690,6 +917,338 @@ class Central:
         if mudou:
             self._mudou()
         self._avisar_player()                # o Windows (e a posicao dele)
+
+    def _chegou_capa(self, linha: str) -> None:
+        """'A <pacote> <chave> <jpeg em base64>' (chave "-" = sem capa).
+        So vem quando a capa muda (musica nova)."""
+        import base64
+        p = linha.split("\t")
+        if len(p) < 4:
+            return
+        pacote, chave, dado = p[1], p[2], p[3]
+        jpeg = None
+        if chave != "-" and dado:
+            try:
+                jpeg = base64.b64decode(dado)
+            except Exception:
+                jpeg = None
+        with self._trava:
+            if jpeg is None:
+                mudou = self.capas.pop(pacote, None) is not None
+            else:
+                mudou = True
+                self.capas[pacote] = (chave, jpeg)
+        if mudou:
+            self._mudou()
+            self._avisar_player()            # a capa no Windows tambem
+
+    # -- o ouvinte (03/out) -----------------------------------------------------
+    # `android\Ouvinte.java` de pe: o shell registrado como ouvinte de
+    # notificacoes (como a barra do Android). Manda as acoes e imagens de
+    # cada notificacao e obedece "apertar a acao" (com o texto da resposta) e
+    # "tocar no corpo" (abrir o item exato). A leitura das notificacoes
+    # continua pelo `cmd notification`: o ouvinte so acrescenta.
+
+    def _manter_ouvinte(self, serial: str, geracao: int) -> None:
+        falhas = 0
+        while geracao == self._geracao and falhas < 10:
+            if not self._por_jar(serial):
+                return
+            try:
+                proc = subprocess.Popen(
+                    [str(self._adb()), "-s", serial, "shell",
+                     "CLASSPATH=%s app_process / scrcpyf.Ouvinte"
+                     % JAR_NO_CELULAR], stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    creationflags=SEM_JANELA)
+            except Exception as erro:
+                self.anotar("ouvinte: nao subiu (%s)" % erro)
+                return
+            self._ouvinte_proc = proc
+            subiu_em = time.monotonic()
+            recusado = False
+            for bruta in proc.stdout:
+                if geracao != self._geracao:
+                    break
+                linha = bruta.decode("utf-8", errors="replace").rstrip("\r\n")
+                try:
+                    recusado = self._linha_do_ouvinte(linha, falhas) or recusado
+                except Exception:
+                    log.exception("ouvinte: linha")
+            self._ouvinte_respostas_soltas()
+            with self._trava:
+                tinha = bool(self.ouvidas) or self.ouvinte_ok
+                self.ouvidas = {}
+                self.ouvinte_ok = False
+                self.ouvinte_versao += 1
+            if tinha:
+                self._mudou()
+            if geracao != self._geracao or recusado:
+                break                       # o Android nao deixa: nao insiste
+            if time.monotonic() - subiu_em > 120:
+                falhas = 0
+            falhas += 1
+            # (sem reenviar o jar daqui: reescrever o arquivo com o player
+            # rodando dele podia derrubar o player; quem reenvia e o player)
+            if falhas in (1, 5):
+                self.anotar("ouvinte: caiu; subindo de novo (%dx)" % falhas)
+            time.sleep(3)
+
+    @staticmethod
+    def _desesc(campo: str) -> str:
+        return re.sub(r"\\(.)", lambda m: {"t": "\t", "n": "\n"}.get(
+            m.group(1), m.group(1)), campo)
+
+    def _linha_do_ouvinte(self, linha: str, falhas: int) -> bool:
+        """Uma linha do ouvinte. Devolve True se o Android recusou."""
+        import base64
+        p = linha.split("\t")
+        if p[0] == "N" and len(p) >= 4:
+            chave = self._desesc(p[1]).replace("\n", "\\n")   # forma interna
+            try:
+                total = int(p[3])
+            except ValueError:
+                return False
+            if len(p) < 6 + 2 * total:
+                return False
+            acoes = []
+            for i in range(total):
+                titulo, tipo = self._desesc(p[4 + 2 * i]), p[5 + 2 * i]
+                acoes.append((titulo, tipo.startswith("t"), tipo.endswith("a")))
+            icone, foto = p[4 + 2 * total], p[5 + 2 * total]
+            with self._trava:
+                antes = self.ouvidas.get(chave) or {}
+                novo = {"toque": p[2], "acoes": acoes,
+                        "icone": antes.get("icone"), "foto": antes.get("foto"),
+                        "rostos": antes.get("rostos") or {},
+                        "conversa": antes.get("conversa"),
+                        "proprios": antes.get("proprios")}
+                for nome, dado in (("icone", icone), ("foto", foto)):
+                    if dado == "-":
+                        novo[nome] = None
+                    elif dado != "=":
+                        try:
+                            novo[nome] = base64.b64decode(dado)
+                        except Exception:
+                            novo[nome] = None
+                mudou = novo != antes
+                self.ouvidas[chave] = novo
+                if mudou:
+                    self.ouvinte_versao += 1
+                # (03/out) O ouvinte sabe NA HORA: notificacao que a lista
+                # ainda nao tem vira evento, como o do logcat (que nem toda
+                # notificacao gera -- a do shell, por exemplo, nao gerava e
+                # so entrava na conferencia de 1 min).
+                nova = self.ouvinte_ok and chave not in self.ativas
+                # (07/out, achado no Gmail: o "excluida · desfazer" trocou a
+                # notificacao na MESMA chave e o evento do Android nao chegou;
+                # o cartao ficou com o e-mail antigo) o ouvinte ve toda
+                # mudanca: a que JA existe tambem e relida
+                if mudou and self.ouvinte_ok and chave in self.ativas \
+                        and self._pronto:
+                    nova = True
+                if nova:
+                    self._eventos.append(("chegou", chave, time.monotonic()))
+            if nova:
+                self._sujo.set()
+            if mudou and self.ouvinte_ok:
+                self._mudou()
+        elif p[0] == "P" and len(p) >= 4:
+            # (03/out) a foto de quem fala na conversa
+            chave, nome = self._desesc(p[1]), self._desesc(p[2])
+            try:
+                png = base64.b64decode(p[3]) if p[3] not in ("-", "=") \
+                    else None
+            except Exception:
+                png = None
+            with self._trava:
+                o = self.ouvidas.get(chave)
+                if o is None:
+                    return False
+                rostos = dict(o.get("rostos") or {})
+                if png is None:
+                    rostos.pop(nome, None)
+                else:
+                    rostos[nome] = png
+                mudou = rostos != (o.get("rostos") or {})
+                self.ouvidas[chave] = dict(o, rostos=rostos)
+                if mudou:
+                    self.ouvinte_versao += 1
+            if mudou and self.ouvinte_ok:
+                self._mudou()
+        elif p[0] == "M" and len(p) >= 6:
+            # (03/out, relato dele: o WhatsApp nao mostrava quem mandou) a
+            # conversa lida do objeto: o `cmd notification` so tem a Person
+            chave = self._desesc(p[1]).replace("\n", "\\n")   # forma interna
+            try:
+                total = int(p[5])
+            except ValueError:
+                return False
+            if len(p) < 6 + 3 * total:
+                return False
+            eu = self._desesc(p[4])
+            msgs = []
+            for i in range(total):
+                quem = self._desesc(p[6 + 3 * i])
+                try:
+                    quando = int(p[8 + 3 * i])
+                except ValueError:
+                    quando = 0
+                msgs.append((quem or eu or "você", self._desesc(p[7 + 3 * i]),
+                             quando))
+            conversa = (self._desesc(p[2]), p[3] == "1", tuple(msgs))
+            with self._trava:
+                o = self.ouvidas.get(chave)
+                if o is None or o.get("conversa") == conversa:
+                    return False
+                primeira_vez = o.get("conversa") is None
+            if primeira_vez:
+                # (03/out) diagnostico SEM conteudo: so a forma da conversa
+                self.anotar("notificacoes: conversa %s: %d mensagens, %d com "
+                            "nome, grupo=%s, eu=%s, foto=%s" % (
+                                chave.split("|")[1], total,
+                                sum(1 for i in range(total) if p[6 + 3 * i]),
+                                p[3], "sim" if eu else "nao",
+                                "sim" if o.get("icone") else "nao"))
+            with self._trava:
+                o = self.ouvidas.get(chave)
+                if o is None:
+                    return False
+                self.ouvidas[chave] = dict(o, conversa=conversa)
+                n = self.ativas.get(chave)
+                if n is not None:
+                    _por_conversa(n, conversa)
+                self.ouvinte_versao += 1
+            if self.ouvinte_ok:
+                self._mudou()
+        elif p[0] == "V" and len(p) >= 3:
+            # (07/out) os textos do layout PROPRIO do app (o "excluida ·
+            # desfazer" do Gmail): o titulo/texto de sempre ficam velhos
+            chave = self._desesc(p[1]).replace("\n", "\\n")   # forma interna
+            try:
+                total = int(p[2])
+            except ValueError:
+                return False
+            textos = tuple(self._desesc(t) for t in p[3:3 + total]) or None
+            with self._trava:
+                o = self.ouvidas.get(chave)
+                if o is None or o.get("proprios") == textos:
+                    return False
+                self.ouvidas[chave] = dict(o, proprios=textos)
+                self.ouvinte_versao += 1
+            if self.ouvinte_ok:
+                self._mudou()
+        elif p[0] == "X" and len(p) >= 2:
+            chave = self._desesc(p[1]).replace("\n", "\\n")   # forma interna
+            with self._trava:
+                saiu = self.ouvidas.pop(chave, None) is not None
+                if saiu:
+                    self.ouvinte_versao += 1
+                tirar = chave in self.ativas
+                if tirar:
+                    self._eventos.append(("saiu", chave, time.monotonic()))
+            if tirar:
+                self._sujo.set()
+        elif p[0] == "r" and len(p) >= 3:
+            espera = self._ouv_espera.pop(p[1], None)
+            if espera is not None:
+                espera[1] = (p[2] == "ok",
+                             self._desesc(p[3]) if len(p) > 3 else "")
+                espera[0].set()
+        elif linha == "pronto":
+            with self._trava:
+                self.ouvinte_ok = True
+                self.ouvinte_versao += 1
+                total = len(self.ouvidas)
+            if falhas == 0:
+                self.anotar("ouvinte: no ar (%d notificacoes)" % total)
+            self._mudou()
+        elif linha.startswith("erro"):
+            self.anotar("ouvinte: o celular nao deixou (%s); botoes e "
+                        "respostas ficam de fora" % linha[5:200])
+            return True
+        return False
+
+    def _ouvinte_respostas_soltas(self) -> None:
+        """Quem esperava resposta de um ouvinte que caiu: desiste ja."""
+        esperas, self._ouv_espera = self._ouv_espera, {}
+        for espera in esperas.values():
+            espera[1] = (False, "o ouvinte caiu")
+            espera[0].set()
+
+    def _pedir_ouvinte(self, *campos, espera: float = 8.0) -> tuple:
+        """(ok, detalhe). Bloqueia: chamar fora da thread da janela."""
+        proc = self._ouvinte_proc
+        if proc is None or proc.poll() is not None or not self.ouvinte_ok:
+            return False, "ouvinte fora do ar"
+        with self._ouv_trava:
+            self._ouv_id += 1
+            ident = str(self._ouv_id)
+            pedido = [threading.Event(), (False, "sem resposta")]
+            self._ouv_espera[ident] = pedido
+            linha = "\t".join([ident] + [
+                str(c).replace("\\", "\\\\").replace("\t", "\\t")
+                .replace("\n", "\\n").replace("\r", "") for c in campos])
+            try:
+                proc.stdin.write((linha + "\n").encode("utf-8"))
+                proc.stdin.flush()
+            except Exception as erro:
+                self._ouv_espera.pop(ident, None)
+                return False, "nao deu para pedir (%s)" % erro
+        if not pedido[0].wait(espera):
+            self._ouv_espera.pop(ident, None)
+            return False, "o celular nao respondeu"
+        return pedido[1]
+
+    @staticmethod
+    def motivo_legivel(detalhe: str) -> str:
+        """O "por que nao foi" do ouvinte, em portugues de gente."""
+        d = re.sub(r"^\w+(Exception|Error)\s*", "", detalhe or "").strip()
+        conhecidos = {
+            "a notificacao ja saiu": "a notificação já saiu do celular",
+            "a acao mudou": "a notificação mudou; tente de novo",
+            "texto vazio": "escreva alguma coisa",
+            "o celular nao respondeu": "o celular não respondeu",
+            "ouvinte fora do ar": "o celular não está conectado a isto agora",
+            "o ouvinte caiu": "a conexão com o celular caiu",
+        }
+        if d in conhecidos:
+            return conhecidos[d]
+        if "Canceled" in (detalhe or ""):
+            return "o app não aceita mais esse botão"
+        return "o app recusou (%s)" % d[:80] if d else "o app recusou"
+
+    def ouvida(self, chave: str) -> dict | None:
+        """O que o ouvinte sabe desta notificacao (ou None)."""
+        with self._trava:
+            return self.ouvidas.get(chave) if self.ouvinte_ok else None
+
+    def apertar_acao(self, chave: str, indice: int, texto: str = "",
+                     tela: int = -1) -> tuple:
+        """O botao `indice` da notificacao (com `texto` = responder)."""
+        ok, detalhe = self._pedir_ouvinte("a", real_da_chave(chave), indice,
+                                          tela, texto)
+        # (03/out, diagnostico do "marcar como lida") o tipo do destino do
+        # botao como o Android o descreve (broadcastIntent, startService...)
+        with self._trava:
+            n = self.ativas.get(chave)
+        tipo = ""
+        try:
+            if n is not None and 0 <= indice < len(n.acoes):
+                tipo = " [%s]" % n.acoes[indice][1][2]
+        except (IndexError, TypeError):
+            tipo = ""
+        self.anotar("notificacao: acao %d%s%s -> %s" % (
+            indice, tipo, " com texto" if texto else "", detalhe if ok else
+            "FALHOU: %s" % detalhe))
+        return ok, detalhe
+
+    def tocar_corpo(self, chave: str, tela: int = -1) -> tuple:
+        """O toque no corpo da notificacao, como no celular (item exato)."""
+        ok, detalhe = self._pedir_ouvinte("c", real_da_chave(chave), tela)
+        self.anotar("notificacao: toque pelo ouvinte (tela %s) -> %s" % (
+            tela, detalhe if ok else "FALHOU: %s" % detalhe))
+        return ok, detalhe
 
     def fechar_player(self, pacote: str) -> None:
         """
@@ -947,7 +1506,7 @@ class Central:
         resposta = self._pedir("l")
         if resposta is None:
             return                       # caiu: lista vazia nao e "saiu tudo"
-        chaves = [x.strip() for x in resposta if x.strip().count("|") >= 4]
+        chaves = juntar_chaves(resposta)
         with self._trava:
             antigas = dict(self.ativas)
         detalhar = [c for c in chaves if completa or c not in antigas]
@@ -963,10 +1522,31 @@ class Central:
     def _aplicar(self, novas: dict, antigas: dict, desde) -> None:
         """Poe a lista nova no lugar: historico, avisos, log e a janela."""
         novas = {c: n for c, n in novas.items() if not n.interna}
+        sem_conversa = []
+        with self._trava:                  # a conversa do ouvinte (03/out)
+            for c, n in novas.items():
+                conversa = (self.ouvidas.get(c) or {}).get("conversa")
+                if conversa:
+                    _por_conversa(n, conversa)
+                elif n.modelo == "MessagingStyle" and c not in antigas:
+                    sem_conversa.append(n)
+        for n in sem_conversa:             # diagnostico, sem conteudo
+            self.anotar("notificacoes: conversa %s sem a do ouvinte (ouvinte=%s,"
+                        " %d mensagens pelo cmd, %d com nome)" % (
+                            n.pacote, "sim" if self.ouvinte_ok else "nao",
+                            len(n.mensagens),
+                            sum(1 for q, _t, _h in n.mensagens if q)))
         chegaram = [n for c, n in novas.items()
                     if c not in antigas or antigas[c].conteudo() != n.conteudo()]
         sairam = [n for c, n in antigas.items() if c not in novas]
         if not chegaram and not sairam and self._pronto:
+            # (02/out) So o desenho mudou (o download andou, a cor): poe no
+            # lugar e repinta, sem aviso nem historico.
+            if any(c in antigas and antigas[c].aparencia() != n.aparencia()
+                   for c, n in novas.items()):
+                with self._trava:
+                    self.ativas = novas
+                self._mudou()
             return
         with self._trava:
             self.ativas = novas
@@ -978,9 +1558,12 @@ class Central:
         for n in chegaram:
             if not n.fixa and not n.resumo:
                 self._guardar_no_historico(n)
-                # A chamada tem aviso proprio (ver `chamada`).
+                # A chamada tem aviso proprio (ver `chamada`). (03/out) A
+                # MUSICA tambem: o mini player e o player do Windows a
+                # mostram -- o aviso no canto cobria o mini (relato dele).
+                midia = n.modelo == "MediaStyle" or n.categoria == "transport"
                 if not primeira and self.ligada(n.app) and \
-                        n.categoria != "call":
+                        n.categoria != "call" and not midia:
                     if self.pode_avisar is None or self.pode_avisar(n.app):
                         self._avisos.put(n)
                     if self.ao_chegar is not None:
@@ -1095,14 +1678,87 @@ class Central:
 
     def visiveis(self) -> list[Notif]:
         """As da aba: de apps ligados, sem o resumo de grupo que tem filhas;
-        mais novas primeiro."""
+        (02/out) na ORDEM DO ANDROID: conversas, as que alertam e as
+        silenciosas, e dentro de cada parte o "rank" do celular (o mesmo
+        que ordena a barra dele); empate: mais novas primeiro."""
         with self._trava:
             todas = list(self.ativas.values())
         com_filhas = {n.app for n in todas if not n.resumo}
         lista = [n for n in todas if self.ligada(n.app)
                  and not (n.resumo and n.app in com_filhas)]
-        lista.sort(key=lambda n: n.quando, reverse=True)
+        lista.sort(key=lambda n: (n.secao, n.rank, -n.quando))
         return lista
+
+    # -- adiar e nao perturbe (02/out) ----------------------------------------
+
+    ADIAR_MIN = (15, 60, 120)
+
+    def adiar(self, chave: str, minutos: int) -> None:
+        """Como o "adiar" do Android: some agora e VOLTA sozinha (e avisa
+        de novo) depois de `minutos`. O shell pode (`cmd notification
+        snooze`, testado no S22 com app de terceiro)."""
+        with self._trava:
+            n = self.ativas.pop(chave, None)
+        if n is not None:
+            if self.ao_sair is not None:
+                self._ganchos(self.ao_sair, n)
+            self._mudou()
+
+        def trabalho():
+            r = self._pedir("s %d %s" % (minutos * 60000, chave), espera=8)
+            ok = r is not None and any("snoozing" in x for x in r)
+            self.anotar("notificacoes: adiar %d min (%s) -> %s"
+                        % (minutos, chave.split("|")[1] if "|" in chave
+                           else chave, "ok" if ok else (" ".join(r or [])
+                                                        or "sem resposta")[:200]))
+            if not ok:
+                self._sujo.set()             # nao adiou: volta pra lista
+
+        threading.Thread(target=trabalho, daemon=True,
+                         name="notif-adiar").start()
+
+    def ler_nao_perturbe(self) -> None:
+        """O "nao perturbe" do celular (numa thread; `zen` = None nao
+        sabe, False desligado, True ligado). No maximo 1 a cada 5 s."""
+        agora = time.monotonic()
+        if self._servidor is None or \
+                agora - getattr(self, "_zen_lido_em", -99.0) < 5.0:
+            return
+        self._zen_lido_em = agora
+
+        def trabalho():
+            r = self._pedir("z", espera=6)
+            valor = "".join(r or []).strip()
+            novo = None if not valor.isdigit() else valor != "0"
+            if novo != self.zen:
+                self.zen = novo
+                self._mudou()
+
+        threading.Thread(target=trabalho, daemon=True,
+                         name="notif-zen").start()
+
+    def virar_nao_perturbe(self, ligar: bool) -> None:
+        self.zen = ligar                     # na hora; a leitura confirma
+        self._mudou()
+
+        def trabalho():
+            # "priority" = o modo que o botao do celular liga (o "on" do
+            # comando e silencio total, testado no S22: zen_mode 2)
+            self._pedir("Z " + ("priority" if ligar else "off"), espera=6)
+            self.anotar("notificacoes: nao perturbe %s"
+                        % ("ligado" if ligar else "desligado"))
+            self._zen_lido_em = -99.0
+            self.ler_nao_perturbe()
+
+        threading.Thread(target=trabalho, daemon=True,
+                         name="notif-zen-virar").start()
+
+    def capa(self, pacote: str):
+        """(02/out) A capa do album que o app de musica mostra: bytes de um
+        JPEG (ate 256 px) ou None."""
+        with self._trava:
+            c = self.capas.get(pacote)
+        return None if c is None else c[1]
 
     def para_limpar(self, app: str = "") -> list[str]:
         """As chaves do "limpar tudo" (ou do "limpar" de um app): as
@@ -1204,7 +1860,8 @@ class Central:
             self._rodar([adb, "-s", serial, "push", str(jar),
                          JAR_NO_CELULAR], 20)
             self._jar_pronto = serial
-        args = " ".join("'%s'" % c.replace("'", "'\\''") for c in chaves)
+        args = " ".join("'%s'" % real_da_chave(c).replace("'", "'\\''")
+                        for c in chaves)
         saida = self._rodar(
             [adb, "-s", serial, "shell",
              "CLASSPATH=%s app_process / scrcpyf.Notif remover %s"

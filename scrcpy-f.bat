@@ -34,6 +34,17 @@ if errorlevel 1 (
     exit /b 1
 )
 
+REM Ensaio da partida, preso a este console: se algum arquivo do programa
+REM estiver quebrado, o erro cai no partida.txt AQUI. Sem isto, o pythonw
+REM morreria em silencio e nao haveria nada pra ler em lugar nenhum.
+REM A janela entra no ensaio so se o Tk existir nesta instalacao do Python:
+REM sem ele o programa ainda sobe, so com a bandeja, e isso nao e falha.
+REM (08/out, otimizacao) As bibliotecas entram no MESMO ensaio: um Python a
+REM menos em toda partida. So se ele falhar e que se olha se falta biblioteca.
+set "ENSAIO=import PIL, pystray, importlib.util as u, scrcpyf.bandeja, scrcpyf.programa, scrcpyf.registro, scrcpyf.motor_atalhos; u.find_spec('tkinter') and __import__('scrcpyf.janela')"
+python -c "%ENSAIO%" 2>>"%PARTIDA%"
+if not errorlevel 1 goto disparar
+
 python -c "import PIL, pystray" >nul 2>>"%PARTIDA%"
 if errorlevel 1 (
     echo.
@@ -48,13 +59,7 @@ if errorlevel 1 (
         exit /b 1
     )
 )
-
-REM Ensaio da partida, preso a este console: se algum arquivo do programa
-REM estiver quebrado, o erro cai no partida.txt AQUI. Sem isto, o pythonw
-REM morreria em silencio e nao haveria nada pra ler em lugar nenhum.
-REM A janela entra no ensaio so se o Tk existir nesta instalacao do Python:
-REM sem ele o programa ainda sobe, so com a bandeja, e isso nao e falha.
-python -c "import importlib.util as u, scrcpyf.bandeja, scrcpyf.programa, scrcpyf.registro, scrcpyf.motor_atalhos; u.find_spec('tkinter') and __import__('scrcpyf.janela')" 2>>"%PARTIDA%"
+python -c "%ENSAIO%" 2>>"%PARTIDA%"
 if errorlevel 1 (
     echo.
     echo   O programa nao conseguiu carregar. O motivo ficou gravado
@@ -64,6 +69,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
+:disparar
 start "" pythonw app.py
 >>"%PARTIDA%" echo programa disparado; este .bat saiu em seguida
 exit /b 0

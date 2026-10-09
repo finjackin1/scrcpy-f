@@ -104,6 +104,8 @@ class Bandeja:
                        "Parar a extensão", "Procurando o celular..."),
                 pedir("extensao"),
             ),
+            # (03/out, pedido dele) o player do celular colado no relogio
+            pystray.MenuItem("Mini player", pedir("mini_player")),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Parear o celular...", pedir("configurar")),
             pystray.MenuItem("Sair", lambda _i, _it:
@@ -125,6 +127,7 @@ class Bandeja:
                 title=DICA["parado"],
                 menu=self._montar_menu(),
             )
+            self._menu_da_casa()
             self._thread = threading.Thread(target=self._icone.run,
                                             daemon=True, name="bandeja")
             self._thread.start()
@@ -133,6 +136,38 @@ class Bandeja:
             log.warning("bandeja indisponivel: %s", erro)
             self.disponivel = False
             return False
+
+    def _menu_da_casa(self) -> None:
+        """
+        (07/out/2026, pedido dele: "padronizar o botao direito") O botao
+        direito no icone abre o MENU DA CASA (o mesmo dos apps e das
+        notificacoes, desenhado pela janela) em vez do menu do Windows.
+
+        E o unico ponto que mexe por dentro da pystray (0.19): a tabela de
+        mensagens do icone. Se ela mudar numa versao nova, nada quebra -- o
+        menu do Windows (montado acima) continua valendo. O programa so
+        recebe o pedido com o lugar do ponteiro, na thread dele.
+        """
+        try:
+            import ctypes
+            from ctypes import wintypes
+            from pystray._util import win32
+            ic = self._icone
+            tabela = ic._message_handlers
+            original = tabela[win32.WM_NOTIFY]
+        except Exception as erro:
+            log.info("bandeja: menu do windows (%s)", erro)
+            return
+
+        def ao_avisar(wparam, lparam):
+            if lparam == win32.WM_RBUTTONUP and \
+                    getattr(self.programa, "ao_menu_bandeja", None):
+                p = wintypes.POINT()
+                ctypes.windll.user32.GetCursorPos(ctypes.byref(p))
+                self.programa.pedidos.put(("menu_bandeja", p.x, p.y))
+                return None
+            return original(wparam, lparam)
+        tabela[win32.WM_NOTIFY] = ao_avisar
 
     def atualizar(self, estado: str) -> None:
         """

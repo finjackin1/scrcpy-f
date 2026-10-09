@@ -70,7 +70,7 @@ def pintar_icone(janela: tk.Tk, estado: str = "parado") -> None:
     sumiria na primeira coleta de lixo.
     """
     try:
-        from PIL import ImageTk
+        from PIL import Image, ImageTk
 
         from . import icone
     except ImportError:
@@ -86,7 +86,10 @@ def pintar_icone(janela: tk.Tk, estado: str = "parado") -> None:
         imagens = guardados.get(estado)
         if imagens is None:
             desenho = icone.desenhar(estado)
-            imagens = [ImageTk.PhotoImage(desenho.resize((lado, lado)))
+            # (08/out) BOX: o filtro de fabrica (bicubico) deixa um anel
+            # escuro na borda de forma desenhada
+            box = getattr(Image, "Resampling", Image).BOX
+            imagens = [ImageTk.PhotoImage(desenho.resize((lado, lado), box))
                        for lado in (16, 32, 48, 64)]
             guardados[estado] = imagens
         janela._icones_da_barra = imagens  # type: ignore[attr-defined]
@@ -104,6 +107,34 @@ def preparar(janela: tk.Tk) -> None:
     """
     janela.overrideredirect(True)
     janela.after(20, lambda: pintar_icone(janela))
+
+
+def preparar_barra_escondida(janela: tk.Tk) -> bool:
+    """
+    (03/out) A mesma troca de estilo do `fixar_barra_de_tarefas`, mas com a
+    janela AINDA ESCONDIDA: nao precisa do esconde-e-mostra (o Windows le o
+    estilo quando ela aparece) -- era ele que fazia a janela piscar ao abrir.
+    False = o Windows ainda nao tem a janela (fica o jeito antigo).
+    """
+    if not NO_WINDOWS:
+        return True
+    identificador = _identificador(janela)
+    if not identificador:
+        return False
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        if user32.IsWindowVisible(identificador):
+            return False
+        estilo = user32.GetWindowLongW(identificador, GWL_EXSTYLE)
+        estilo = (estilo & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
+        user32.SetWindowLongW(identificador, GWL_EXSTYLE, estilo)
+    except Exception as erro:
+        log.debug("barra de tarefas (escondida): %s", erro)
+        return False
+    arredondar_ao_mostrar(janela)
+    return True
 
 
 def fixar_barra_de_tarefas(janela: tk.Tk) -> None:
@@ -150,8 +181,10 @@ def fixar_barra_de_tarefas(janela: tk.Tk) -> None:
     arredondar(janela)
 
 
-def arredondar(janela: tk.Tk) -> None:
-    """Pede cantos arredondados ao compositor. Falha calada no Windows 10."""
+def arredondar(janela: tk.Tk, borda: str | None = None) -> None:
+    """Pede cantos arredondados ao compositor. Falha calada no Windows 10.
+    (03/out) `borda` = "#RRGGBB": a linha fina que o Windows desenha em
+    volta (acompanha a curva; a do Tk e quadrada)."""
     if not NO_WINDOWS:
         return
     identificador = _identificador(janela)
@@ -167,8 +200,37 @@ def arredondar(janela: tk.Tk) -> None:
             ctypes.byref(preferencia),
             ctypes.sizeof(preferencia),
         )
+        if borda:
+            r, g, b = (int(borda[i:i + 2], 16) for i in (1, 3, 5))
+            cor = ctypes.c_uint(r | (g << 8) | (b << 16))   # COLORREF
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                ctypes.c_void_p(identificador), ctypes.c_uint(34),  # BORDER
+                ctypes.byref(cor), ctypes.sizeof(cor))
     except Exception as erro:
         log.debug("cantos arredondados indisponiveis: %s", erro)
+
+
+def arredondar_ao_mostrar(janela: tk.Misc, borda: str | None = None) -> None:
+    """
+    (03/out, teste: os menus continuavam quadrados) Pedido cedo demais --
+    antes de o Windows criar a janela de verdade -- o arredondar falhava
+    calado. Aqui ele espera a janela APARECER (<Map>) e so marca como feito
+    quando o Windows ja tem a janela.
+    """
+    def fazer(_e=None):
+        try:
+            if getattr(janela, "_arredondada", False) or \
+                    not janela.winfo_exists() or not janela.winfo_ismapped():
+                return
+            if not _identificador(janela):
+                return
+            arredondar(janela, borda)
+            janela._arredondada = True
+        except Exception as erro:
+            log.debug("arredondar ao mostrar: %s", erro)
+
+    janela.bind("<Map>", fazer, add="+")
+    janela.after(60, fazer)
 
 
 def minimizar(janela: tk.Tk) -> bool:
@@ -253,7 +315,11 @@ def _api_de_frente():
 
 
 def _hwnd(janela: tk.Tk, u):
-    janela.update_idletasks()
+    # (07/out, travadas medidas) So antes de existir na tela: o
+    # update_idletasks a cada leitura (o status pergunta a cada 0,25 s)
+    # forcava a pintura pendente inteira na hora (~0,35 s parado).
+    if not janela.winfo_ismapped():
+        janela.update_idletasks()
     return u.GetParent(janela.winfo_id())
 
 

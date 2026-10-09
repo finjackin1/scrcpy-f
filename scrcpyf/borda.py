@@ -303,6 +303,25 @@ class _Win:
     def visivel(self, hwnd) -> bool:
         return bool(self.u.IsWindowVisible(hwnd))
 
+    def captura_firme(self) -> bool:
+        """(08/out, medido: na calibracao o cursor do PC voou ate o canto) O
+        cursor escondido sozinho engana -- logo que a extensao liga ele some
+        um instante sem o scrcpy estar com o mouse, e o movimento da
+        calibracao ia para o PC. Prova: um empurraozinho injetado (ida e
+        volta, saldo zero no celular) NAO pode mexer o cursor do PC; mexeu =
+        nao pegou, e o cursor volta para onde estava."""
+        if not self.escondido():
+            return False
+        antes = self.ponteiro()
+        self.movimentos([(24, 0)])
+        time.sleep(0.012)
+        depois = self.ponteiro()
+        self.movimentos([(-24, 0)])
+        if abs(depois[0] - antes[0]) > 10 or abs(depois[1] - antes[1]) > 10:
+            self.mover(*antes)
+            return False
+        return True
+
     def escondido(self) -> bool:
         ci = self.CURSORINFO()
         ci.cbSize = self.ct.sizeof(self.CURSORINFO)
@@ -492,6 +511,104 @@ class _Win:
 
     def na_frente(self):
         return self.u.GetForegroundWindow()
+
+
+class TravaDoMouse:
+    """
+    (08/out/2026, pedido dele: "quando ligo a extensao pegue o controle do
+    mouse pelos segundos que precisa pra calibrar e trave ele no lugar ate
+    terminar a calibracao, mas se demorar mais que 2 s libere o mouse")
+    Um gancho de mouse de baixo nivel ENGOLE o mouse de verdade (a mao) --
+    movimento, clique e rodinha; o que o programa injeta para calibrar
+    (LLMHF_INJECTED) passa. Engolido aqui, o movimento nao chega nem ao
+    scrcpy (que le a entrada "crua") -- o cursor do celular so anda pela
+    calibracao. Sai sozinha em `max_s`.
+    """
+
+    INJETADO = 0x01          # LLMHF_INJECTED
+
+    def __init__(self, max_s: float = 2.0) -> None:
+        self.max_s = max_s
+        self._thread: threading.Thread | None = None
+        self._id_thread = 0
+        self._pronto = threading.Event()
+
+    def ligar(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._rodar, daemon=True,
+                                        name="trava-mouse")
+        self._thread.start()
+        self._pronto.wait(1.0)
+
+    def desligar(self) -> None:
+        t, self._thread = self._thread, None
+        if t is None:
+            return
+        try:
+            import ctypes
+            ctypes.WinDLL("user32").PostThreadMessageW(self._id_thread,
+                                                       0x0012, 0, 0)  # WM_QUIT
+        except Exception:
+            pass
+        t.join(timeout=1.0)
+
+    def _rodar(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+        try:
+            u = ctypes.WinDLL("user32")
+            k = ctypes.WinDLL("kernel32")
+            LRESULT = ctypes.c_ssize_t
+
+            class MSLLHOOKSTRUCT(ctypes.Structure):
+                _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long),
+                            ("mouseData", wintypes.DWORD),
+                            ("flags", wintypes.DWORD), ("time", wintypes.DWORD),
+                            ("dwExtraInfo", ctypes.c_size_t)]
+
+            PROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, ctypes.c_size_t,
+                                      ctypes.c_ssize_t)
+            u.SetWindowsHookExW.argtypes = [ctypes.c_int, PROC,
+                                            ctypes.c_void_p, wintypes.DWORD]
+            u.SetWindowsHookExW.restype = ctypes.c_void_p
+            u.CallNextHookEx.argtypes = [ctypes.c_void_p, ctypes.c_int,
+                                         ctypes.c_size_t, ctypes.c_ssize_t]
+            u.CallNextHookEx.restype = LRESULT
+            u.UnhookWindowsHookEx.argtypes = [ctypes.c_void_p]
+            u.GetMessageW.argtypes = [ctypes.POINTER(wintypes.MSG),
+                                      ctypes.c_void_p, ctypes.c_uint,
+                                      ctypes.c_uint]
+            u.SetTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+                                   ctypes.c_uint, ctypes.c_void_p]
+            k.GetModuleHandleW.argtypes = [ctypes.c_wchar_p]
+            k.GetModuleHandleW.restype = ctypes.c_void_p
+
+            def gancho(codigo, wparam, lparam):
+                if codigo >= 0:
+                    dado = MSLLHOOKSTRUCT.from_address(lparam)
+                    if not dado.flags & self.INJETADO:
+                        return 1                  # a mao: engolida
+                return u.CallNextHookEx(None, codigo, wparam, lparam)
+
+            proc = PROC(gancho)
+            self._id_thread = k.GetCurrentThreadId()
+            h = u.SetWindowsHookExW(14, proc, k.GetModuleHandleW(None), 0)
+            # o limite: um timer da propria fila encerra o laco
+            u.SetTimer(None, 0, int(self.max_s * 1000), None)
+            self._pronto.set()
+            msg = wintypes.MSG()
+            try:
+                while u.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+                    if msg.message == 0x0113:     # WM_TIMER: passou do limite
+                        break
+            finally:
+                if h:
+                    u.UnhookWindowsHookEx(h)
+        except Exception:
+            log.exception("a trava do mouse falhou")
+        finally:
+            self._pronto.set()
 
 
 class GanchoDeTeclas:
@@ -763,9 +880,18 @@ EMPURRAO_CONTAGENS = 1
 # movimento feito entre encostar na borda e o celular estar pronto e gravado
 # e REPETIDO no celular logo depois, com o mesmo ritmo -- ate este tanto:
 REPETIR_ATE_S = 0.25
+# (08/out, pedido dele: "a aceleracao do mouse ao entrar no celular ainda ta
+# alta, diminua em 50%") o movimento da mao repetido na entrada vai com
+# METADE da forca; e depois do empurrao forte (o cursor sai do canto onde
+# ficou escondido) uma pausa curta deixa o Android desacelerar antes da mao
+FATOR_DA_REPETICAO = 0.5
+PAUSA_DEPOIS_DO_EMPURRAO_S = 0.12
 # Tempo em que o ajuste da entrada (levar o cursor do celular ao ponto
 # equivalente) e espalhado: curto para nao se notar, longo o bastante para o
 # celular nao acelerar no maximo.
+# (08/out) tentado na metade do tempo (0,09 / 0,15 s a 8000 px/s) a pedido
+# dele; no teste o Android acelerou e o cursor passou do lugar ("pega com o
+# mouse depois da metade ao contrario de onde saiu") -- voltou ao de antes
 AJUSTE_S = 0.18
 # O ajuste da entrada e uma conta em cima de outra conta: quanto MAIOR o
 # pedaco a percorrer, mais ele erra, e o cursor nasce fora do lugar (relato
@@ -1263,6 +1389,9 @@ class Borda:
         # e o que faz o vigia tentar de novo quando a mao parar.
         self.calibrada = False
         self._precisa_calibrar = True
+        # (08/out, pedido dele) a 1a calibracao (a extensao ligou) e NA HORA,
+        # com o mouse travado (`TravaDoMouse`), sem esperar a mao parar
+        self._primeira_calibracao = True
         self._tentativas = 0
         self._ultimo_ponteiro = None
         self._parado_desde = 0.0
@@ -1530,7 +1659,8 @@ class Borda:
                     if (self._precisa_calibrar and hwnd
                             and self._tentativas < TENTATIVAS_DE_CALIBRAR
                             and agora >= self._proxima_calibracao
-                            and self._mao_parada(pos, agora)
+                            and (self._mao_parada(pos, agora)
+                                 or self._primeira_calibracao)
                             and not w.botao_apertado()
                             # (02/out, revisao) Jogo em tela cheia (ou com o
                             # mouse preso) perdia o foco para a calibracao.
@@ -1693,6 +1823,13 @@ class Borda:
                 w.passou_por_cima(hwnd)
                 w.soltar_scrcpy(hwnd)    # a mesma tecla liga a captura
                 if self._esperar_captura(w, 0.35, nossa=None):
+                    # (08/out) so vale a captura CONFIRMADA: com o cursor
+                    # escondido por outro motivo, o empurrao da entrada ia
+                    # para o PC ("entrou travado e muito rapido")
+                    if not w.captura_firme():
+                        time.sleep(0.03)
+                        if not w.captura_firme():
+                            continue
                     modo = "tecla" if tentativa == 0 else "tecla, 2a vez"
                     break
                 if w.escondido() or w.na_frente() != hwnd:
@@ -1772,7 +1909,14 @@ class Borda:
 
         salto = abs(f * comprimento - (self._da_tela(lado, *self._pos_celular)[1]
                                        if self._pos_celular is not None else 0.0))
-        if self._pos_celular is not None and salto <= SALTO_GRANDE * comprimento:
+        # (08/out, relato dele: "perto da metade da tela pra baixo ele vem da
+        # parte de baixo do celular para onde deveria estar") com o cursor
+        # ESCONDIDO no canto, o caminho suave o deslizava a vista ate o lugar;
+        # o forte (canto + volta de uma vez) e instantaneo. Escondido = forte.
+        escondido = getattr(self, "_cursor_escondido", False)
+        self._cursor_escondido = False
+        if self._pos_celular is not None and not escondido and \
+                salto <= SALTO_GRANDE * comprimento:
             # CAMINHO SUAVE (teste dele, 19/set/2026: "o mouse entra com muita
             # velocidade no android e ... para quase no meio da tela"). O
             # empurrao forte deixava o Android acelerando no maximo por um
@@ -1826,6 +1970,7 @@ class Borda:
                 w.movimentos([canto] * 24)
                 time.sleep(0.12)
             w.movimentos([canto] * 24 + volta)
+            time.sleep(PAUSA_DEPOIS_DO_EMPURRAO_S)
         except Exception:
             log.exception("nao consegui levar o cursor a borda")
         self._primeira_entrada = False
@@ -1878,6 +2023,9 @@ class Borda:
         """A conta perdeu o ponto de partida: avisa e calibra quando der."""
         self.calibrada = False
         self._precisa_calibrar = True
+        # (08/out, pedido dele) a 1a calibracao (a extensao ligou) e NA HORA,
+        # com o mouse travado (`TravaDoMouse`), sem esperar a mao parar
+        self._primeira_calibracao = True
         self._proxima_calibracao = 0.0
         self._tentativas = 0
         self._ultimo_ponteiro = None
@@ -1905,6 +2053,11 @@ class Borda:
         vertical = lado in ("direita", "esquerda")
         canto = (fora[0], -127) if vertical else (-127, fora[1])
         t = LADO_DA_JANELINHA
+        trava = None
+        if self._primeira_calibracao:
+            self._primeira_calibracao = False
+            trava = TravaDoMouse(2.0)
+            trava.ligar()                 # a mao parada a forca, ate 2 s
         pos = w.ponteiro()
         frente = w.na_frente()
         w.por_debaixo(hwnd, pos[0] - t // 2, pos[1] - t // 2)
@@ -1914,14 +2067,34 @@ class Borda:
             fim = time.monotonic() + 0.2
             while not w.tem_o_teclado(hwnd) and time.monotonic() < fim:
                 time.sleep(0.003)
-            for _vez in range(2):
-                w.passou_por_cima(hwnd)
-                w.soltar_scrcpy(hwnd)
-                if self._esperar_captura(w, 0.22, nossa=None):
+            # (08/out, medido) "pegou" so com a captura CONFIRMADA
+            # (`captura_firme`); logo que a extensao liga o scrcpy ainda nao
+            # esta pronto: tenta de novo por ate ~1,6 s (a trava dura 2 s)
+            limite = time.monotonic() + 1.6
+            forcar = False
+            while not pegou and time.monotonic() < limite:
+                if forcar or not w.escondido():
+                    forcar = False
+                    w.passou_por_cima(hwnd)
+                    w.soltar_scrcpy(hwnd)
+                    if not self._esperar_captura(w, 0.22, nossa=None):
+                        # o SDL ainda abrindo puxa o cursor para o canto da
+                        # janelinha: volta para onde ele estava
+                        if w.ponteiro() != pos:
+                            w.mover(*pos)
+                        time.sleep(0.1)
+                        continue
+                time.sleep(0.03)            # o SDL termina de pegar
+                if w.captura_firme():
                     pegou = True
                     break
-                if w.escondido():
+                # escondido sem pegar: espera e confere de novo; ainda nao =
+                # a tecla de pegar vai de novo
+                time.sleep(0.12)
+                if w.escondido() and w.captura_firme():
+                    pegou = True
                     break
+                forcar = True
             if pegou:
                 # Duas rajadas: a primeira as vezes se perde enquanto o
                 # scrcpy acaba de pegar o mouse. Com a mao parada nao ha
@@ -1930,6 +2103,12 @@ class Borda:
                 time.sleep(0.05)
                 w.movimentos([canto] * 24)
                 time.sleep(0.03)
+                # (08/out, relato dele: a 1a entrada depois de ligar "entrou
+                # travada e muito rapido") o cursor ficava A VISTA no canto de
+                # cima e a 1a entrada o arrastava dali: vai ao canto escondido
+                # e a entrada vai de uma vez
+                self._lado = lado
+                self._esconder_cursor_do_celular(w)
         finally:
             if w.escondido():
                 w.soltar_scrcpy(hwnd)
@@ -1944,14 +2123,19 @@ class Borda:
                     w.ativar(frente)
                 except Exception:
                     pass
+            if trava is not None:
+                trava.desligar()
         self.calibrada = bool(pegou)
         self._precisa_calibrar = not pegou
-        if pegou:
+        if pegou and not getattr(self, "_cursor_escondido", False):
             # O canto onde o cursor ficou, na TELA do celular (x, y).
             with self._trava:
                 largura, altura = self._celular["tela"]
             self._pos_celular = (0.0 if canto[0] < 0 else float(largura),
                                  0.0 if canto[1] < 0 else float(altura))
+        if pegou:
+            # (escondido: o canto escondido ja ficou guardado em
+            # `_esconder_cursor_do_celular`)
             self._primeira_entrada = False
         self._aviso("calibrou" if pegou else "nao calibrou")
 
@@ -2039,7 +2223,10 @@ class Borda:
                 enviar = []
                 while fila and fila[0][2] - inicio_gravado <= decorrido:
                     dx, dy, _q = fila.pop(0)
-                    enviar.append((dx, dy, True))
+                    dx = int(round(dx * FATOR_DA_REPETICAO))
+                    dy = int(round(dy * FATOR_DA_REPETICAO))
+                    if dx or dy:
+                        enviar.append((dx, dy, True))
                 if ajuste:
                     parte = min(1.0, decorrido / max(0.05, tempo_ajuste))
                     falta = [total[k] * parte - feito[k] for k in (0, 1)]
@@ -2117,6 +2304,7 @@ class Borda:
             self._gancho = None
         existe = bool(hwnd) and w.existe(hwnd)
         if existe and w.escondido():
+            self._esconder_cursor_do_celular(w)
             w.soltar_scrcpy(hwnd)
             fim = time.monotonic() + 0.3
             while w.escondido() and time.monotonic() < fim:
@@ -2150,6 +2338,39 @@ class Borda:
                 round(est.distancia), est.limite,
                 round(est.ao_longo), est.comprimento)
         self._aviso("voltou", motivo)
+
+    # (08/out, pedido dele: "o mouse sumir quando ele sair do celular pro pc,
+    # igual ele some no pc quando ta no celular") O Android so esconde o
+    # cursor de um mouse de verdade depois de ~15 s parado (a tecla so o
+    # esconde no Android 15+ com um campo de texto aberto). Entao, na volta,
+    # o cursor do celular e levado ao CANTO do lado do PC em que a seta fica
+    # fora da tela: ela nasce na ponta e cresce para a direita e para baixo,
+    # entao na borda de baixo ou na da direita so sobra o pixel da ponta.
+    # A posicao guardada passa a ser esse canto (a proxima entrada parte
+    # dali, pelo caminho suave ao longo da borda).
+    CANTO_ESCONDIDO = {"direita": (-127, 127), "esquerda": (127, 127),
+                       "cima": (127, 127), "baixo": (127, -127)}
+
+    def _esconder_cursor_do_celular(self, w: _Win) -> None:
+        lado = getattr(self, "_lado", None)
+        canto = self.CANTO_ESCONDIDO.get(lado)
+        if canto is None:
+            return
+        try:
+            # (08/out, relato dele: "as vezes o mouse nao sumia") duas
+            # rajadas: a primeira as vezes se perde (como na calibracao)
+            w.movimentos([canto] * 24)
+            time.sleep(0.04)
+            w.movimentos([canto] * 24)
+            time.sleep(0.03)
+        except Exception:
+            log.exception("nao consegui esconder o cursor do celular")
+            return
+        with self._trava:
+            largura, altura = self._celular["tela"]
+        self._pos_celular = (0.0 if canto[0] < 0 else float(largura),
+                             0.0 if canto[1] < 0 else float(altura))
+        self._cursor_escondido = True     # a proxima entrada vai de uma vez
 
     @staticmethod
     def _deslizar(w: _Win, alvo, entrada, velocidade: float) -> None:

@@ -78,28 +78,30 @@ SEM_TAXA = {"flac", "raw"}
 # `dica` e o texto curto que aparece do lado do nome, na mesma linha -- tem
 # que caber em ~28 caracteres, que e o que sobra numa janela de 380.
 
+# (07/out, rework) Na ORDEM DE IMPORTANCIA para quem usa: o que mais muda
+# o que se ve primeiro (resolucao, quadros, nitidez), o tecnico por ultimo.
 AJUSTES_VIDEO = [
-    {"secao": "video", "campo": "codec", "nome": "Codec",
-     "dica": "H.264 responde mais rápido", "opcoes": CODEC_VIDEO},
-    {"secao": "video", "campo": "bitrate", "nome": "Taxa de bits",
-     "dica": "Mb/s  ·  mais = mais nítido", "opcoes": TAXA_VIDEO},
-    {"secao": "video", "campo": "fps_max", "nome": "Quadros por segundo",
-     "dica": "limite, não garantia", "opcoes": QUADROS},
     {"secao": "video", "campo": "resolucao", "nome": "Resolução",
      "dica": "celular = a do aparelho", "opcoes": RESOLUCAO},
+    {"secao": "video", "campo": "fps_max", "nome": "Quadros por segundo",
+     "dica": "limite, não garantia", "opcoes": QUADROS},
+    {"secao": "video", "campo": "bitrate", "nome": "Taxa de bits",
+     "dica": "Mb/s  ·  mais = mais nítido", "opcoes": TAXA_VIDEO},
     {"secao": "video", "campo": "buffer_ms", "nome": "Atraso da imagem",
      "dica": "ms  ·  sobe se picotar", "opcoes": ATRASO_VIDEO},
+    {"secao": "video", "campo": "codec", "nome": "Codec",
+     "dica": "H.264 responde mais rápido", "opcoes": CODEC_VIDEO},
 ]
 
 AJUSTES_AUDIO = [
     {"secao": "audio", "campo": "origem", "nome": "Onde o som toca",
      "dica": "PC e celular: Android 13+", "opcoes": ORIGEM},
-    {"secao": "audio", "campo": "codec", "nome": "Codec",
-     "dica": "troque se o som não vier", "opcoes": CODEC_AUDIO},
     {"secao": "audio", "campo": "bitrate", "nome": "Taxa de bits",
      "dica": "kb/s", "opcoes": TAXA_AUDIO},
     {"secao": "audio", "campo": "buffer_ms", "nome": "Atraso do som",
      "dica": "ms  ·  sobe se estalar", "opcoes": ATRASO_AUDIO},
+    {"secao": "audio", "campo": "codec", "nome": "Codec",
+     "dica": "troque se o som não vier", "opcoes": CODEC_AUDIO},
 ]
 
 
@@ -253,12 +255,18 @@ def _nivel(niveis, chave) -> dict:
     return {}
 
 
+# (07/out, rework pedido dele) Os MESMOS tres nomes nas duas conexoes
+# (rapido / equilibrado / maxima), do menor atraso para a melhor imagem; os
+# ids antigos ficam (config, modos e apps continuam apontando certo). Os
+# valores do sem fio sao os que ele ajustou para jogar; a maxima ganhou som
+# de 192 kb/s.
 PREDEF_FIXAS = [
-    ("leve", "leve", _nivel(NIVEIS_VIDEO, "leve"), _nivel(NIVEIS_AUDIO, "leve")),
+    ("leve", "rápido", _nivel(NIVEIS_VIDEO, "leve"),
+     _nivel(NIVEIS_AUDIO, "leve")),
     ("equilibrado", "equilibrado", _nivel(NIVEIS_VIDEO, "padrao"),
      _nivel(NIVEIS_AUDIO, "padrao")),
-    ("celular", "celular", _nivel(NIVEIS_VIDEO, "celular"),
-     _nivel(NIVEIS_AUDIO, "padrao")),
+    ("celular", "máxima", _nivel(NIVEIS_VIDEO, "celular"),
+     {"codec": "opus", "bitrate": "192K", "buffer_ms": 50}),
 ]
 PREDEF_INICIAL = "equilibrado"
 
@@ -304,9 +312,9 @@ PREDEF_FIXAS_CABO = [
 PREDEF_INICIAL_CABO = "cabo_equilibrado"
 
 TEXTO_DAS_FIXAS = {
-    "leve": "menor atraso e sem travar no wi-fi; imagem em 480p.",
-    "equilibrado": "resposta rápida, imagem em 720p. pede wi-fi bom.",
-    "celular": "a resolução exata do celular. pede wi-fi bom.",
+    "leve": "o menor atraso e sem travar no wi-fi. imagem em 480p.",
+    "equilibrado": "resposta rápida e imagem boa (720p). pede wi-fi bom.",
+    "celular": "a resolução do celular e som mais cheio. pede wi-fi forte.",
     "cabo_rapido": "o menor atraso: 1080p, até 120 quadros, som em 20 ms.",
     "cabo_equilibrado": "a resolução do celular, rápida e estável.",
     "cabo_maxima": "a melhor imagem (h.265, 40 mb/s) e som sem perda.",
@@ -413,7 +421,9 @@ def aplicar_no_perfil(perfil: dict, video: dict | None,
 # ONDE O SOM TOCA (um nome so em todo o programa, 23/set/2026).
 # "celular" = o som fica no celular (nada vem); "pc" = so no PC;
 # "ambos" = no PC e no celular (Android 13+).
-ONDE = [("celular", "celular"), ("pc", "pc"), ("ambos", "pc e celular")]
+# (07/out) "os dois" no lugar de "pc e celular": as tres opcoes cabem em
+# fatias iguais (o "pc" ficava espremido ao lado)
+ONDE = [("celular", "celular"), ("pc", "pc"), ("ambos", "os dois")]
 
 
 def aplicar_onde(perfil: dict, onde: str) -> None:
@@ -482,16 +492,26 @@ def _p_de_lado(lado) -> int:
 
 def migrar(q: dict, apps: dict) -> bool:
     """(r189) Uma vez: "resolucao_max" (lado maior) vira "resolucao" (p);
-    a fixa "nitido" saiu -> "celular". True = mudou algo."""
+    a fixa "nitido" saiu -> "celular". True = mudou algo.
+    (07/out) Fixas revistas: quem estava numa fixa fica com a fixa nova."""
     if q.get("resolucao_v") == 2:
-        return False
-    fixas = {c: (v, a) for c, _n, v, a in PREDEF_FIXAS}
+        if q.get("fixas_v") == 3:
+            return False
+        for con in CONEXOES:
+            base = conjunto(q, con)
+            esc = base.get("escolhida")
+            for c, _n, v, a in fixas(con):
+                if c == esc:
+                    base["video"], base["audio"] = dict(v), dict(a)
+        q["fixas_v"] = 3
+        return True
+    velhas = {c: (v, a) for c, _n, v, a in PREDEF_FIXAS}
     if q.get("escolhida") == "nitido":
         q["escolhida"] = "celular"
     esc = q.get("escolhida")
-    if esc in fixas:
+    if esc in velhas:
         # Estava numa fixa: fica com a fixa NOVA inteira.
-        q["video"], q["audio"] = dict(fixas[esc][0]), dict(fixas[esc][1])
+        q["video"], q["audio"] = dict(velhas[esc][0]), dict(velhas[esc][1])
     for parte in [q.get("video")] + [m.get("video") for m in
                                      (q.get("minhas") or [])
                                      if isinstance(m, dict)]:
@@ -501,4 +521,158 @@ def migrar(q: dict, apps: dict) -> bool:
         if isinstance(conf, dict) and conf.get("predef") == "nitido":
             conf["predef"] = "celular"
     q["resolucao_v"] = 2
+    q["fixas_v"] = 3
+    return True
+
+# ============================================================================
+# (08/out/2026, pedido dele: rework de video e audio) TRES NIVEIS DE IMAGEM
+# pela RESOLUCAO e DOIS DE SOM, IGUAIS no cabo e no sem fio. O resto fica
+# ESCONDIDO e fixo:
+#   imagem: baixo 960x540 = 4 mb/s, medio 1280x720 = 8, alto 1920x1080 = 16;
+#           H.264, 60 quadros, sem atraso. Padrao: medio (720p).
+#   som:    normal = Opus 128 kb/s, alto = Opus 192 kb/s; atraso 50 ms.
+#           Padrao: normal.
+# O nivel e o som valem de OPCOES > qualidade para tudo; cada modo (espelhar,
+# extensao: "nivel"/"som" no perfil) e cada app (no apps.json) pode ter o
+# seu. As predefinicoes antigas (fixas, "minhas", ajuste fino) viram nivel e
+# som na migracao (`migrar_niveis`).
+# ============================================================================
+
+NIVEIS = [("baixo", "960 × 540", 540), ("medio", "1280 × 720", 720),
+          ("alto", "1920 × 1080", 1080)]
+NOMES_NIVEL = {"baixo": "baixo", "medio": "médio", "alto": "alto"}
+NIVEL_PADRAO = "medio"
+P_DO_NIVEL = {c: p for c, _r, p in NIVEIS}
+TAXA_DO_NIVEL = {"baixo": "4M", "medio": "8M", "alto": "16M"}
+
+SONS = [("normal", "normal", "128K"), ("alto", "alto", "192K")]
+SOM_PADRAO = "normal"
+TAXA_DO_SOM = {c: t for c, _n, t in SONS}
+
+
+def nivel_valido(nivel) -> str:
+    return nivel if nivel in P_DO_NIVEL else ""
+
+
+def rotulos_nivel() -> list:
+    """(valor, rotulo) da fileira: "960 × 540 · baixo"."""
+    return [(c, "%s · %s" % (r, NOMES_NIVEL[c])) for c, r, _p in NIVEIS]
+
+
+def nivel_geral(q: dict) -> str:
+    return nivel_valido((q or {}).get("nivel")) or NIVEL_PADRAO
+
+
+def som_valido(som) -> str:
+    return som if som in TAXA_DO_SOM else ""
+
+
+def som_geral(q: dict) -> str:
+    return som_valido((q or {}).get("som")) or SOM_PADRAO
+
+
+def video_do_nivel(nivel: str) -> dict:
+    nivel = nivel_valido(nivel) or NIVEL_PADRAO
+    return {"codec": "h264", "bitrate": TAXA_DO_NIVEL[nivel], "fps_max": 60,
+            "resolucao": P_DO_NIVEL[nivel], "buffer_ms": 0}
+
+
+def audio_do_som(som: str) -> dict:
+    som = som_valido(som) or SOM_PADRAO
+    return {"codec": "opus", "bitrate": TAXA_DO_SOM[som], "buffer_ms": 50}
+
+
+def nivel_de(deste: dict, q: dict) -> str:
+    """O nivel que vale: o proprio (modo ou app), senao o geral."""
+    return nivel_valido((deste or {}).get("nivel")) or nivel_geral(q)
+
+
+def som_de(deste: dict, q: dict) -> str:
+    return som_valido((deste or {}).get("som")) or som_geral(q)
+
+
+def resumo(nivel: str, som: str) -> str:
+    """'720p · som normal' (o que vale, para cabecalhos e listas)."""
+    return "%dp · som %s" % (P_DO_NIVEL[nivel_valido(nivel) or NIVEL_PADRAO],
+                             som_valido(som) or SOM_PADRAO)
+
+
+def _nivel_de_p(p) -> str:
+    """Resolucao antiga em "p" -> o nivel (0 = a do celular = alto)."""
+    try:
+        p = int(float(p or 0))
+    except (TypeError, ValueError):
+        p = 0
+    if p <= 0:
+        return "alto"
+    return "baixo" if p <= 540 else "medio" if p <= 720 else "alto"
+
+
+def _nivel_da_predef(q: dict, ident) -> str:
+    video, _a = valores_da_predef(q, ident) if ident else (None, None)
+    if video is None:
+        return ""
+    return _nivel_de_p(video.get("resolucao"))
+
+
+def _som_da_predef(q: dict, ident) -> str:
+    _v, audio = valores_da_predef(q, ident) if ident else (None, None)
+    if audio is None:
+        return ""
+    return _som_de_taxa(audio.get("bitrate"))
+
+
+def _som_de_taxa(taxa) -> str:
+    try:
+        k = float(str(taxa or "").upper().rstrip("K"))
+    except ValueError:
+        return ""
+    return "alto" if k >= 160 else "normal"
+
+
+def migrar_niveis(q: dict, perfis: dict, apps: dict) -> bool:
+    """UMA vez: a predefinicao escolhida vira o nivel e o som gerais; a de
+    cada modo e de cada app vira o dele (so se diferente do geral). Ajuste
+    fino, itens, largura, resolucao, orientacao escolhida e "melhor modo
+    desligado" saem (escondidos: o nivel e a verificacao mandam). A
+    orientacao RECONHECIDA (apps["orientacao"]) fica. True = mudou algo."""
+    if q.get("niveis_v") == 1:
+        return False
+    esc = q.get("escolhida") or predef_atual(q, "sem_fio")
+    q["nivel"] = _nivel_da_predef(q, esc) or \
+        _nivel_de_p((q.get("video") or {}).get("resolucao")) or NIVEL_PADRAO
+    q["som"] = _som_da_predef(q, esc) or \
+        _som_de_taxa((q.get("audio") or {}).get("bitrate")) or SOM_PADRAO
+    for perfil in (perfis or {}).values():
+        if not isinstance(perfil, dict):
+            continue
+        ident = perfil.get("predef")
+        n, s = _nivel_da_predef(q, ident), _som_da_predef(q, ident)
+        for chave in CHAVES_PREDEF.values():
+            perfil.pop(chave, None)
+        if n and n != q["nivel"]:
+            perfil["nivel"] = n
+        if s and s != q["som"]:
+            perfil["som"] = s
+    por = (apps or {}).get("por_app") or {}
+    for pac, conf in list(por.items()):
+        if not isinstance(conf, dict):
+            continue
+        ident = conf.get("predef")
+        n = _nivel_da_predef(q, ident) or (
+            _nivel_de_p(conf["res_pc"]) if conf.get("res_pc") else "")
+        s = _som_da_predef(q, ident)
+        for campo in list(CHAVES_PREDEF.values()) + [
+                "video_fino", "audio_fino", "itens", "res_pc", "resolucao",
+                "sw_dp", "forma", "formato"]:
+            conf.pop(campo, None)
+        if n and n != q["nivel"]:
+            conf["nivel"] = n
+        if s and s != q["som"]:
+            conf["som"] = s
+        if not conf:
+            por.pop(pac)
+    for campo in ("itens", "res_pc", "forma", "melhor_auto"):
+        (apps or {}).pop(campo, None)
+    q["niveis_v"] = 1
     return True

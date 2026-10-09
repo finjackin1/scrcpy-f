@@ -40,6 +40,16 @@ ACIMA_DO_NORMAL = 0x00008000 if os.name == "nt" else 0
 # valor que se mostrou suficiente na versao de scripts.
 ESPERA_PARA_SAIR = 1.5
 
+# (08/out, pedido dele) AREA DE TRANSFERENCIA COMPARTILHADA: copiar no celular
+# vai para o PC e vice-versa (o de fabrica do scrcpy). Desligada em OPCOES >
+# geral, toda sessao com controle sobe com --no-clipboard-autosync. Quem muda
+# e o programa (`Programa.aplicar_area_compartilhada`).
+AREA_COMPARTILHADA = True
+
+# (09/out) opcoes do codificador para menos atraso (ver `montar`); vazio =
+# desligadas (o programa esvazia se o celular recusar).
+OPCOES_CODEC = "priority=0,latency=1"
+
 
 def montar(scrcpy_exe, serial: str, perfil: dict) -> list:
     """
@@ -70,6 +80,13 @@ def montar(scrcpy_exe, serial: str, perfil: dict) -> list:
         if _numero(video.get("resolucao_max")) > 0:
             linha.append("--max-size=%d" % _numero(video["resolucao_max"]))
         linha.append("--video-buffer=%d" % _numero(video.get("buffer_ms")))
+        # (09/out, pedido dele: menos atraso no sem fio, sem mexer nas
+        # predefinicoes) o codificador do celular em TEMPO REAL: prioridade
+        # 0 e 1 quadro de latencia (MediaFormat KEY_PRIORITY / KEY_LATENCY,
+        # Android 11+; mais velho ignora). Resolucao, taxa e quadros nao
+        # mudam. Celular que recusar: o programa tira e anota.
+        if OPCOES_CODEC and video.get("codec", "h264") in ("h264", "h265"):
+            linha.append("--video-codec-options=%s" % OPCOES_CODEC)
 
         if perfil.get("titulo"):
             linha.append("--window-title=%s" % perfil["titulo"])
@@ -125,6 +142,9 @@ def montar(scrcpy_exe, serial: str, perfil: dict) -> list:
         # Sem imagem nao ha janela nem controle pra ter. Uma opcao so, que e a
         # que a versao de scripts ja usava no modo audio.
         linha.append("--no-window")
+    if not AREA_COMPARTILHADA and controle.get("teclado_mouse", True) and \
+            (video.get("ligado", True) or controle.get("teclado_mouse")):
+        linha.append("--no-clipboard-autosync")
 
     # -- som -----------------------------------------------------------------
     if audio.get("ligado", True):

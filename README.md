@@ -37,24 +37,26 @@ recurso não existe na versão dele, em vez de quebrar.
 | **Extensão** (Ctrl+Alt+2) | o celular vira uma tela a mais do PC: o mouse e o teclado passam para ele pela borda (veja abaixo) |
 | **Apps** | cada app do celular numa janela própria do Windows, com o ícone e o nome do app e um botão separado na barra de tarefas. O celular continua livre na sua mão |
 | **Status** | bateria, temperatura, memória e o que mais pesa no celular |
-| **Notificações** | as notificações do celular no PC, como no celular: **×** remove lá também, e o que você tira no celular some aqui. Um aviso no canto da tela quando chega uma (clique abre o app numa janela do PC; respeita o "não perturbe" do Windows). **histórico** das últimas 24 horas. Em **ajustes**, uma chave geral (todos os apps) e uma por app; o botão direito num app, em Apps, também liga ou desliga. Mostra quais apps estão com as notificações desligadas no próprio celular. Nada disso muda o celular. **No Windows:** as notificações também ficam na Central de Notificações (clique abre no scrcpy-f) e a música que toca no celular aparece nos controles de mídia do Windows, com as teclas de música do teclado. O **player** fica no topo da aba, com barra de progresso e botões; botão direito numa notificação traz as opções do Android (configurações, desativar...); código de verificação ganha "copiar código" |
-| **Parear** | **conexão**: o celular em uso, os outros por perto — inclusive os ainda não conectados, com **conectar** — e a conexão preferida — **sem fio** ou **cabo** (trocar não derruba nada: o que está aberto segue como está, o que abrir depois usa a nova; preferindo o cabo, funciona mesmo sem Wi-Fi). **adicionar**: parear à mão, com cabo ou com código. O quadradinho fica verde com o celular conectado, em tempo real |
-| **Opções** | avisos do programa, abrir com o Windows, página inicial, pasta do scrcpy e atualizações; atalhos de teclado; qualidade de imagem e som **separada por conexão**: **sem fio** (predefinições **leve**, **equilibrado** e **celular**) e **cabo** (**rápido**, **equilibrado** e **máxima** — até 120 quadros, 40 Mb/s e som sem perda), cada uma com até 3 suas; resolução em 480p/720p/1080p/1440p ou a do celular. O programa usa a da conexão em uso, e Espelhar, Extensão e cada app podem ter a sua para cada conexão |
+| **Notificações** | as notificações do celular no PC, como no celular: **×** remove lá também, e o que você tira no celular some aqui. Um aviso no canto da tela quando chega uma (clique abre o app numa janela do PC; respeita o "não perturbe" do Windows). **histórico** das últimas 24 horas. Em **ajustes**, uma chave geral (todos os apps) e uma por app; o botão direito num app, em Apps, também liga ou desliga. Mostra quais apps estão com as notificações desligadas no próprio celular. Nada disso muda o celular. **No Windows:** as notificações também ficam na Central de Notificações (clique abre no scrcpy-f) e a música que toca no celular aparece nos controles de mídia do Windows, com as teclas de música do teclado. O **player** fica no topo da aba, com barra de progresso e botões; botão direito numa notificação traz as opções do Android (configurações, desativar...); código de verificação ganha "copiar código". **Responder pelo PC** (sem instalar nada no celular): os botões do próprio app (Responder, Marcar como lida, Curtir...) no cartão aberto, no aviso do canto e na Central do Windows; clicar na notificação abre o item exato (a conversa, o e-mail) na janela do app; foto de quem mandou e imagem da notificação. **Mini player**: o player do celular numa janelinha junto do relógio (menu do ícone ou atalho) |
+| **Parear** | **conexão**: o celular em uso, os outros por perto — inclusive os ainda não conectados, com **conectar** — e a conexão preferida — **sem fio** ou **cabo** (trocar não derruba nada: o que está aberto segue como está, o que abrir depois usa a nova; preferindo o cabo, funciona mesmo sem Wi-Fi). Preferindo o sem fio, **ligar o cabo abre o sem fio sozinho** (depois é só tirar o cabo). **adicionar**: parear à mão, com cabo ou com código. O quadradinho fica verde com o celular conectado, em tempo real |
+| **Opções** | avisos do programa, abrir com o Windows, página inicial, pasta do scrcpy e atualizações; atalhos de teclado (com busca); **rodapé** com indicadores de conexão e som (cada gesto pode ganhar uma função). **Qualidade**, igual no cabo e no sem fio: **imagem** 540p / 720p / 1080p (4 / 8 / 16 Mb/s, 60 quadros, sem atraso), **som** normal ou alto, **janela dos apps** (pc / tablet ou celular) e **tamanho nos apps** (90% a 130%). Espelhar, Extensão e cada app podem ter a sua. No sem fio, o codificador do celular trabalha em tempo real e o Wi-Fi do celular entra no modo de baixa latência enquanto houver sessão (volta ao normal sozinho) |
 
 Tudo é gravado no instante do clique, sem botão de salvar.
 
 ### Apps em janela própria
 
 - **Clique** abre o app (ou traz a janela dele para a frente); **botão
-  direito** abre em tela cheia, cria o atalho e leva às **configurações
-  personalizadas** daquele app, separadas em **vídeo**, **áudio** e
-  **outros**:
-  - **formato** da janela: celular (em pé, como no aparelho), 4:3, 16:9 ou
-    21:9 — jogo costuma pedir 16:9;
-  - **resolução**: a do celular ou de 480p a 2160p — só aparecem as que o
-    celular consegue transmitir naquele formato;
-  - qualidade de imagem e som, onde o som toca, teclado do celular e fechar
-    o app no celular quando a janela fecha.
+  direito** abre em tela cheia, fixa na lista, cria o atalho e leva às
+  **configurações personalizadas** daquele app: imagem, som, **janela**
+  (pc / tablet — a tela de tablet do app, como num monitor — ou celular),
+  **tamanho** (90% a 130%), onde o som toca, ao fechar, sempre em tela cheia
+  e correções para apps que não se dão bem com mouse e teclado.
+- **Modo pc / tablet automático**: ao conectar, o programa lê de cada app se
+  ele tem tela de tablet (nada é baixado) e indica o melhor modo; jogos abrem
+  deitados em 16:9.
+- **Busca** na lista (e nos atalhos e nas notificações): os apps que saem
+  somem esmaecendo e os outros deslizam até o lugar; agiu num resultado, a
+  busca se apaga.
 - **Apps duplicados** (Dual Messenger do Samsung, "apps duplos" do Xiaomi,
   perfil de trabalho...) aparecem duas vezes — "WhatsApp" e "WhatsApp (2)",
   com um número no ícone — e cada um abre na sua janela, com ajustes e

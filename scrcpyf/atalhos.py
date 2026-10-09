@@ -35,15 +35,14 @@ ACOES: dict[str, str] = {
     "mostrar_janela": "Abrir / fechar a janela",
     "fixar_espelhamento": "Espelhamento por cima / solto",
     "trocar_janelas": "Trocar entre as janelas do celular",
+    "mini_player": "Mini player (abrir / fechar)",
+    # (07/out, pedido dele) as funcoes dos indicadores do rodape
+    "som_trocar": "Som: trocar pc / celular",
+    "som_ambos": "Som: no pc e no celular",
+    "som_todos": "Som: o mesmo em todos os modos",
+    "con_trocar": "Conexão: trocar cabo / sem fio",
+    "con_alternar": "Conexão: desconectar / conectar de novo",
 }
-
-# Os atalhos de fabrica: os numeros da lista de modos da janela (1 e 2) SAO
-# estes atalhos. So entram quando a pessoa ainda nao tem nenhum.
-DE_FABRICA: dict[str, str] = {
-    "alternar_jogo": "Ctrl+Alt+1",
-    "alternar_extensao": "Ctrl+Alt+2",
-}
-
 
 # -- as teclas -------------------------------------------------------------
 #

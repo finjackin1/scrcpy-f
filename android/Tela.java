@@ -62,6 +62,24 @@ public final class Tela {
     }
 
     static void ordem(String o) {
+        if ("acordar-off".equals(o)) {
+            acordarApagado();
+            return;
+        }
+        if ("ping".equals(o)) {
+            /* (08/out) aquece (carrega o DisplayControl) SEM mexer no painel:
+               o "on" de aquecer acendia uma tela apagada por nos */
+            try {
+                int n;
+                synchronized (TRAVA) {
+                    n = aplicar(-1);
+                }
+                escrever("ok ping " + n);
+            } catch (Throwable t) {
+                escrever("erro " + causa(t));
+            }
+            return;
+        }
         int modo = "off".equals(o) ? 0 : 2;
         try {
             int n;
@@ -70,6 +88,35 @@ public final class Tela {
                 sApagada = modo == 0;
             }
             escrever("ok " + modo + " " + n);
+        } catch (Throwable t) {
+            escrever("erro " + causa(t));
+        }
+    }
+
+    /**
+     * (08/out/2026, pedido dele: abrir um app no PC nao acende a tela do
+     * celular) Acorda e deixa o painel DESLIGADO: o Android liga o painel uns
+     * instantes depois de acordar, entao o "off" e reaplicado a cada 25 ms por
+     * 0,6 s -- pega o momento em que ele acende (a piscada some ou fica num
+     * quadro). Responde como o "off": "ok 0 <telas>".
+     */
+    static void acordarApagado() {
+        try {
+            int n;
+            synchronized (TRAVA) {
+                n = aplicar(0);
+                acordar();
+                /* (08/out, relato dele: ainda piscou uma vez) 1,5 s, a cada
+                   20 ms: acordando de um sono mais fundo o Android liga o
+                   painel mais tarde que 0,6 s */
+                long fim = System.nanoTime() + 1500L * 1000000L;
+                while (System.nanoTime() < fim) {
+                    n = aplicar(0);
+                    Thread.sleep(20);
+                }
+                sApagada = true;
+            }
+            escrever("ok 0 " + n);
         } catch (Throwable t) {
             escrever("erro " + causa(t));
         }
@@ -132,7 +179,9 @@ public final class Tela {
         int n = 0;
         for (Object t : tokens) {
             if (t != null) {
-                power.invoke(null, t, modo);
+                if (modo >= 0) {
+                    power.invoke(null, t, modo);
+                }
                 n++;
             }
         }

@@ -36,6 +36,8 @@ public final class Midia {
         try {
             if ("vigiar".equals(modo)) {
                 vigiar();
+            } else if ("capas".equals(modo)) {
+                capas();                      // (teste) as capas de agora
             } else {
                 escrever(foto());
             }
@@ -240,6 +242,104 @@ public final class Midia {
                 + esc(artista) + "\t" + esc(album);
     }
 
+    // -- a capa do album (02/out/2026) ---------------------------------------
+    // "A <pacote> <chave> <jpeg base64>" quando a capa de um app muda (a chave
+    // e titulo/artista/album/tamanho: so comprime de novo na musica nova).
+    // Chave "-" = o app nao tem capa. Ate LADO_CAPA px, JPEG 85.
+
+    static final int LADO_CAPA = 256;
+    static final java.util.Map<String, String> sCapas =
+            new java.util.HashMap<String, String>();
+
+    static Object bitmapDe(Object meta) {
+        for (String k : new String[]{"android.media.metadata.ALBUM_ART",
+                "android.media.metadata.ART",
+                "android.media.metadata.DISPLAY_ICON"}) {
+            try {
+                Object b = meta.getClass().getMethod("getBitmap", String.class)
+                        .invoke(meta, k);
+                if (b != null) {
+                    return b;
+                }
+            } catch (Throwable t) {
+                // a proxima chave
+            }
+        }
+        return null;
+    }
+
+    static String jpeg(Object bmp) throws Exception {
+        Class<?> bc = Class.forName("android.graphics.Bitmap");
+        int w = (Integer) bc.getMethod("getWidth").invoke(bmp);
+        int h = (Integer) bc.getMethod("getHeight").invoke(bmp);
+        Class<?> cfg = Class.forName("android.graphics.Bitmap$Config");
+        try {
+            // bitmap de "hardware" nao se le direto: copia para a memoria
+            bmp = bc.getMethod("copy", cfg, boolean.class)
+                    .invoke(bmp, cfg.getField("ARGB_8888").get(null), false);
+        } catch (Throwable t) {
+            // fica a original
+        }
+        if (w > LADO_CAPA || h > LADO_CAPA) {
+            float f = Math.min(LADO_CAPA / (float) w, LADO_CAPA / (float) h);
+            bmp = bc.getMethod("createScaledBitmap", bc, int.class, int.class,
+                    boolean.class).invoke(null, bmp, Math.max(1, (int) (w * f)),
+                    Math.max(1, (int) (h * f)), true);
+        }
+        Class<?> fmt = Class.forName("android.graphics.Bitmap$CompressFormat");
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        bc.getMethod("compress", fmt, int.class, java.io.OutputStream.class)
+                .invoke(bmp, fmt.getField("JPEG").get(null), 85, out);
+        return java.util.Base64.getEncoder().encodeToString(out.toByteArray());
+    }
+
+    static void capas() {
+        java.util.Set<String> vistos = new java.util.HashSet<String>();
+        List<Object> lista;
+        try {
+            lista = controles();
+        } catch (Throwable t) {
+            return;
+        }
+        for (Object c : lista) {
+            try {
+                String pkg = String.valueOf(semArg(c, "getPackageName"));
+                if (!vistos.add(pkg)) {
+                    continue;
+                }
+                Object meta = semArg(c, "getMetadata");
+                Object bmp = meta == null ? null : bitmapDe(meta);
+                String chave = "-";
+                if (bmp != null) {
+                    Class<?> bc = bmp.getClass();
+                    chave = Integer.toHexString((texto(meta,
+                            "android.media.metadata.TITLE") + "|"
+                            + texto(meta, "android.media.metadata.ARTIST") + "|"
+                            + texto(meta, "android.media.metadata.ALBUM") + "|"
+                            + bc.getMethod("getWidth").invoke(bmp) + "x"
+                            + bc.getMethod("getHeight").invoke(bmp)).hashCode());
+                }
+                if (chave.equals(sCapas.get(pkg))) {
+                    continue;
+                }
+                String dado = "";
+                if (bmp != null) {
+                    try {
+                        dado = jpeg(bmp);
+                    } catch (Throwable t) {
+                        escrever("erro capa: " + causa(t));
+                        chave = "-";
+                    }
+                }
+                sCapas.put(pkg, chave);
+                escrever("A\t" + esc(pkg) + "\t" + chave + "\t" + dado);
+            } catch (Throwable t) {
+                // sessao que caiu no meio
+            }
+        }
+        sCapas.keySet().retainAll(vistos);   // voltou depois: manda de novo
+    }
+
     static String foto() throws Exception {
         StringBuilder b = new StringBuilder();
         for (Object c : controles()) {
@@ -358,6 +458,7 @@ public final class Midia {
         String antes = null;
         long ultima = 0;
         String fotoAntes = "";
+        long ultimaCapa = 0;
         while (true) {
             String f;
             try {
@@ -367,6 +468,12 @@ public final class Midia {
             }
             String chave = semPosicao(f);
             long agora = System.currentTimeMillis();
+            // Musica nova: a capa antes da foto. E a cada 2 s (app que poe a
+            // capa um pouco depois do titulo).
+            if (!chave.equals(antes) || agora - ultimaCapa > 2000) {
+                capas();
+                ultimaCapa = agora;
+            }
             boolean pulou = pulou(fotoAntes, f, agora - ultima);
             if (sForcar || pulou || !chave.equals(antes)
                     || agora - ultima > 5000) {

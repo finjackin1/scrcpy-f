@@ -212,6 +212,7 @@ class Programa:
         sistema.prioridade_do_programa()
         self.config = Config.carregar()
         celular.PREFERENCIA = self.conexao_preferida()
+        self.aplicar_area_compartilhada()           # (08/out)
         # (r192) Seriais de OUTRO celular (id diferente do que esta em uso):
         # a troca de conexao nao os le de novo a cada olhada.
         self._outro_celular: set = set()
@@ -324,6 +325,12 @@ class Programa:
             self.notif.ao_player = self._windows_player
             threading.Thread(target=self._registrar_windows, daemon=True,
                              name="windows-registro").start()
+            # (08/out) o import do winrt DEPOIS da janela: junto com ela,
+            # disputava o processador e a janela demorava mais (medido)
+            t = threading.Timer(4.0, central_windows.aquecer)
+            t.daemon = True
+            t.name = "windows-aquecer"
+            t.start()
         # (r191) As threads que falam com o adb sobem SO AGORA, com o
         # objeto inteiro montado (antes subiam no meio do __init__ e o
         # vigia da conexao podia ler `adb_pausado`/`_sair` antes de
@@ -441,6 +448,7 @@ class Programa:
         # UTF-8 aqui, e nao o `celular._rodar`: nome de app tem acento, e
         # lido na codificacao do Windows um "Á" derruba a leitura inteira.
         import subprocess
+        self._vez_de_lancar()
         try:
             r = subprocess.run(
                 [str(self.config.scrcpy_exe), "-s", alvo, "--list-apps"],
@@ -587,11 +595,17 @@ class Programa:
                            "Escolha a pasta do scrcpy em opcoes > geral.")
             return
         self.anotar("pedido: abrir o app %s (%s)" % (rotulo, pacote))
+        self.retomar_conexao()      # (07/out) abrir um app = quer o celular
         try:
             self.config.lembrar_recente(pacote)   # grupo "recentes" da lista
         except Exception as erro:
             log.warning("nao gravei o recente: %s", erro)
         self.ligando.add(nome)
+        # (08/out, pedido dele) o app marcado para SEMPRE abrir em tela cheia
+        # (sair dela pelo menu continua valendo ate fechar a janela)
+        if not tela_cheia and pacote != DEX and \
+                self.config.app(pacote).get("tela_cheia"):
+            tela_cheia = True
         if tela_cheia:
             self._tela_cheia.add(pacote)
         else:
@@ -601,7 +615,8 @@ class Programa:
                          kwargs={"tela_cheia": tela_cheia},
                          daemon=True, name="partida-%s" % nome).start()
 
-    def reabrir_app(self, pacote: str, tela_cheia=None) -> None:
+    def reabrir_app(self, pacote: str, tela_cheia=None,
+                    virou: bool = False) -> None:
         """
         AJUSTE DO APP SEM FECHAR A JANELA (pedido dele, 24/set/2026): a
         janela e trocada por uma nova, no mesmo lugar e na mesma altura, ja
@@ -619,6 +634,20 @@ class Programa:
         from . import janela_scrcpy
         hwnd = self._janela_da_sessao(nome)
         lugar = janela_scrcpy.area(hwnd) if hwnd else None
+        if lugar and not virou and pacote != DEX:
+            # (07/out) A orientacao escolhida mudou: a janela vira junto.
+            try:
+                nova = self._tela_do_app(pacote, self.config_efetiva(
+                    pacote, getattr(sessao, "serial", "")))
+            except Exception:
+                nova = None
+            if nova and "deitado" in nova and \
+                    nova["deitado"] != (lugar[2] > lugar[3]):
+                virou = True
+        if virou and lugar:
+            # (07/out) Em pe <-> deitado: a altura nova e a largura velha
+            # (o lado curto continua do mesmo tamanho na tela).
+            lugar = (lugar[0], lugar[1], lugar[3], lugar[2])
         estava = pacote in self._tela_cheia
         cheia = estava if tela_cheia is None else bool(tela_cheia)
         if cheia and not estava and lugar:
@@ -988,13 +1017,42 @@ class Programa:
         except Exception:
             return None
 
-    def _windows_chegou(self, n) -> None:
+    def _windows_chegou(self, n, de_novo: bool = False) -> None:
         if self.windows_notif is None or \
                 not self.config.opcao("notif_windows"):
             return
+        # (03/out) Os botoes e o responder vem do ouvinte; ele costuma chegar
+        # antes, mas se ainda nao chegou, tenta uma vez daqui a pouco.
+        o = self.notif.ouvida(n.chave)
+        if o is None and self.notif.ouvinte_ok and not de_novo:
+            t = threading.Timer(1.5, lambda: self._windows_chegou(n, True))
+            t.daemon = True
+            t.start()
+            return
+        o = o or {}
+        acoes = [(i, titulo, texto) for i, (titulo, texto, _tela)
+                 in enumerate((o.get("acoes") or [])[:3])]
         self.windows_notif.mostrar(n.chave, n.app, self._nome_windows(n.app),
                                    n.titulo, n.texto or n.subtexto,
-                                   self._icone_windows(n.app))
+                                   self._icone_windows(n.app), acoes,
+                                   self._rosto_windows(o.get("icone")))
+
+    def _rosto_windows(self, png):
+        """(03/out) A foto de quem mandou num arquivo para o Windows (um por
+        foto, na pasta temporaria; o mesmo nome = a mesma foto)."""
+        if not png:
+            return None
+        import hashlib
+        import tempfile
+        from pathlib import Path
+        arq = Path(tempfile.gettempdir()) / ("scrcpy-f-rosto-%s.png" %
+                                             hashlib.md5(png).hexdigest()[:12])
+        try:
+            if not arq.exists():
+                arq.write_bytes(png)
+            return arq
+        except Exception:
+            return None
 
     def _windows_player(self, m, posicao: int) -> None:
         if self.windows_player is None:
@@ -1002,9 +1060,33 @@ class Programa:
         if not self.config.opcao("player_windows"):
             m = None
         app = m["pacote"] if m else ""
+        imagem = (self._capa_windows(app) or self._icone_windows(app)) \
+            if m else None
         self.windows_player.atualizar(m, posicao, self._nome_windows(app)
-                                      if m else "", self._icone_windows(app)
-                                      if m else None)
+                                      if m else "", imagem)
+
+    def _capa_windows(self, app: str):
+        """(02/out) A capa do album (do celular) num arquivo para o Windows
+        mostrar nos controles de midia. Um arquivo por capa (o Windows
+        guarda a imagem pelo endereco); a anterior e apagada."""
+        capa = self.notif.capa(app) if self.notif is not None else None
+        if not capa:
+            return None
+        import hashlib
+        import tempfile
+        from pathlib import Path
+        arq = Path(tempfile.gettempdir()) / ("scrcpy-f-capa-%s.jpg" %
+                                             hashlib.md5(capa).hexdigest()[:12])
+        try:
+            if not arq.exists():
+                arq.write_bytes(capa)
+                velha = getattr(self, "_capa_arquivo", None)
+                if velha is not None and velha != arq:
+                    velha.unlink(missing_ok=True)
+            self._capa_arquivo = arq
+            return arq
+        except OSError:
+            return None
 
     def _botao_windows(self, acao: str, ms: int) -> None:
         """Botao (ou tecla de midia) dos controles do Windows -> o celular."""
@@ -1074,16 +1156,76 @@ class Programa:
                          daemon=True, name="notif-abrir").start()
 
     def _abrir_destino(self, app: str, alvo, chave: str = "") -> None:
+        pelo_ouvinte = False
         try:
-            self._abrir_destino_ja(app, alvo)
+            # (03/out) Com o ouvinte, o toque e o MESMO do celular (o item
+            # exato: a conversa, o e-mail), na janela do app.
+            pelo_ouvinte = self._pelo_ouvinte(app, chave, -1)
+            if not pelo_ouvinte:
+                self._abrir_destino_ja(app, alvo)
         finally:
             # Depois de ler o destino: tirar antes podia levar junto o
-            # registro do PendingIntent que o `dumpsys` mostra.
-            n = next((x for x in self.notif.todas() if x.chave == chave),
-                     None) if chave else None
-            if n is not None and "AUTO_CANCEL" in n.flags:
-                self.anotar("notificacao: aberta -> sai (AUTO_CANCEL)")
-                self.notif.remover([chave])
+            # registro do PendingIntent que o `dumpsys` mostra. Pelo ouvinte
+            # quem tira e o `_abrir_intencao`, depois do toque.
+            if not pelo_ouvinte:
+                self._tirar_se_auto(chave)
+
+    def _tirar_se_auto(self, chave: str) -> None:
+        n = next((x for x in self.notif.todas() if x.chave == chave),
+                 None) if chave else None
+        if n is not None and "AUTO_CANCEL" in n.flags:
+            self.anotar("notificacao: aberta -> sai (AUTO_CANCEL)")
+            self.notif.remover([chave])
+
+    PELO_OUVINTE = "--scrcpyf-ouvinte"
+
+    def _pelo_ouvinte(self, app: str, chave: str, indice: int) -> bool:
+        """
+        (03/out) O toque (`indice` -1) ou o botao `indice` da notificacao
+        abre uma TELA do app: pelo ouvinte ela abre na janela do app no PC,
+        exatamente onde o toque no celular abriria. False = sem ouvinte,
+        nao abre tela, ou o app nao abre em janela (fica o jeito antigo).
+        """
+        o = self.notif.ouvida(chave) if chave else None
+        if not o:
+            return False
+        if indice < 0:
+            abre_tela = o.get("toque") == "a"
+        else:
+            acoes = o.get("acoes") or []
+            abre_tela = 0 <= indice < len(acoes) and acoes[indice][2]
+        if not abre_tela or not any(a[1] == app for a in (
+                getattr(self, "apps_do_celular", None) or [])):
+            return False
+        self.anotar("notificacao: %s pelo ouvinte -> janela %s" % (
+            "toque" if indice < 0 else "botao %d" % indice, app))
+        self.pedidos.put(("abrir_destino", app, self._nome_do_app(app),
+                          [self.PELO_OUVINTE, chave, str(indice)]))
+        return True
+
+    def acao_notificacao(self, app: str, chave: str, indice: int,
+                         texto: str = "", ao_fim=None) -> None:
+        """
+        (03/out) Um botao do proprio app na notificacao (Responder, Marcar
+        como lida, Curtir...). Com `texto`: a resposta. O que abre tela vai
+        para a janela do app; o resto o celular faz sozinho. `ao_fim(ok,
+        detalhe)` e chamado DE OUTRA THREAD.
+        """
+        def trabalho():
+            ok, detalhe = False, ""
+            try:
+                if not texto and self._pelo_ouvinte(app, chave, indice):
+                    ok, detalhe = True, "abrindo"
+                else:
+                    ok, detalhe = self.notif.apertar_acao(chave, indice, texto)
+            except Exception as erro:
+                log.exception("acao da notificacao")
+                ok, detalhe = False, str(erro)
+            if ao_fim is not None:
+                ao_fim(ok, detalhe)
+
+        threading.Thread(target=trabalho, daemon=True,
+                         name="notif-acao").start()
 
     def _abrir_destino_ja(self, app: str, alvo) -> None:
         from . import notificacoes
@@ -1175,11 +1317,18 @@ class Programa:
         self.anotar("pedido: abrir o app %s (%s) no destino da notificacao"
                     % (nome, janela))
         self.ligando.add(APP + janela)
-        self._tela_cheia.discard(janela)
+        # (08/out) o app marcado "sempre em tela cheia" tambem abre assim
+        # pela notificacao
+        cheia = bool(self.config.app(janela).get("tela_cheia"))
+        if cheia:
+            self._tela_cheia.add(janela)
+        else:
+            self._tela_cheia.discard(janela)
         self._avisar_mudanca()
         threading.Thread(target=self._partida_app,
                          args=(APP + janela, janela, nome),
-                         kwargs={"intencao": args}, daemon=True,
+                         kwargs={"intencao": args, "tela_cheia": cheia},
+                         daemon=True,
                          name="partida-%s" % janela).start()
 
     def _abrir_intencao(self, serial: str, chave: str, sessao, args: list,
@@ -1197,6 +1346,23 @@ class Programa:
                 time.sleep(0.1)
         if not tela:
             self.anotar("notificacao %s: sem a tela da janela" % chave)
+            return
+        if args and args[0] == self.PELO_OUVINTE:
+            # (03/out) O toque/botao de verdade, na tela da janela.
+            k, indice = args[1], int(args[2])
+            if indice < 0:
+                ok, _d = self.notif.tocar_corpo(k, int(tela))
+            else:
+                ok, _d = self.notif.apertar_acao(k, indice, "", int(tela))
+            if ok and indice < 0:
+                self._tirar_se_auto(k)
+            if not ok:
+                comp = self._componente(serial, chave)
+                if comp:
+                    self._shell(serial, "am start --user %d --display %s -n %s"
+                                % (max(usuario, 0), tela, comp), espera=8)
+            if trazer:
+                self.trazer_app(chave)
             return
         resp = self._shell(serial, "am start --user %d --display %s %s"
                            % (max(usuario, 0), tela,
@@ -1611,12 +1777,292 @@ class Programa:
                 return "tela acesa (%s, tentativa %d)" % (estado, vez)
         return "NAO acendeu depois de 4 tentativas (%s)" % estado
 
+    # (08/out, teste dele: "o do celular foi pro pc mas nao o inverso") O
+    # scrcpy so passa o texto do PC para o celular no Ctrl+V dentro da janela
+    # dele. Aqui o programa vigia a area de transferencia do Windows (o numero
+    # de sequencia, sem abrir nada: leve) e, quando muda, poe o texto no
+    # celular (android\Area.java, no scrcpyf-notif.jar). O que veio DO
+    # celular (dono = um scrcpy) nao volta; texto igual ao ultimo nao vai de
+    # novo (sem ida e volta infinita). Tudo isso so com a opcao ligada.
+    AREA_MAX = 16000                     # letras (a linha do adb tem limite)
+
+    def _garantir_vigia_area(self) -> None:
+        t = getattr(self, "_area_thread", None)
+        if t is not None and t.is_alive():
+            return
+        self._area_thread = threading.Thread(target=self._vigia_area,
+                                             daemon=True, name="area-pc")
+        self._area_thread.start()
+
+    @staticmethod
+    def _area_do_windows():
+        """(numero de sequencia, texto ou None, exe do dono) -- so Windows."""
+        import ctypes
+        import ctypes.wintypes as wt
+        import os
+        u, k = ctypes.windll.user32, ctypes.windll.kernel32
+        u.GetClipboardData.restype = ctypes.c_void_p
+        k.GlobalLock.restype = ctypes.c_void_p
+        k.GlobalLock.argtypes = [ctypes.c_void_p]
+        k.GlobalUnlock.argtypes = [ctypes.c_void_p]
+        seq = u.GetClipboardSequenceNumber()
+        dono_exe = ""
+        hwnd = u.GetClipboardOwner()
+        if hwnd:
+            pid = wt.DWORD()
+            u.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            h = k.OpenProcess(0x1000, False, pid.value)
+            if h:
+                buf = ctypes.create_unicode_buffer(600)
+                n = wt.DWORD(600)
+                if k.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n)):
+                    dono_exe = os.path.basename(buf.value).lower()
+                k.CloseHandle(h)
+        texto = None
+        for _vez in range(5):
+            if u.OpenClipboard(None):
+                try:
+                    dados = u.GetClipboardData(13)          # CF_UNICODETEXT
+                    if dados:
+                        p = k.GlobalLock(dados)
+                        if p:
+                            try:
+                                texto = ctypes.wstring_at(p)
+                            finally:
+                                k.GlobalUnlock(dados)
+                finally:
+                    u.CloseClipboard()
+                break
+            time.sleep(0.05)
+        return seq, texto, dono_exe
+
+    @staticmethod
+    def _area_por_no_windows(texto: str) -> bool:
+        """Poe `texto` na area de transferencia do Windows (CF_UNICODETEXT)."""
+        import ctypes
+        u, k = ctypes.windll.user32, ctypes.windll.kernel32
+        k.GlobalAlloc.restype = ctypes.c_void_p
+        k.GlobalLock.restype = ctypes.c_void_p
+        k.GlobalLock.argtypes = [ctypes.c_void_p]
+        k.GlobalUnlock.argtypes = [ctypes.c_void_p]
+        u.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+        dados = (texto + "\0").encode("utf-16-le")
+        for _vez in range(10):
+            if u.OpenClipboard(None):
+                break
+            time.sleep(0.05)
+        else:
+            return False
+        try:
+            u.EmptyClipboard()
+            h = k.GlobalAlloc(0x0002, len(dados))         # GMEM_MOVEABLE
+            p = k.GlobalLock(h)
+            ctypes.memmove(p, dados, len(dados))
+            k.GlobalUnlock(h)
+            return bool(u.SetClipboardData(13, h))
+        finally:
+            u.CloseClipboard()
+
+    def _area_no_celular(self, serial: str):
+        """(08/out, relato dele: "a copia do celular ainda nao foi pro pc")
+        O programinha `Area vigiar` de pe no celular: avisa quando o texto de
+        la muda ("C") e recebe o do PC ("S") sem abrir processo novo. O
+        scrcpy so sincroniza com uma janela dele aberta; isto vale sempre."""
+        import base64
+        import subprocess
+        proc = getattr(self, "_area_proc", None)
+        if proc is not None and proc.poll() is None and \
+                getattr(self, "_area_proc_serial", "") == serial:
+            return proc
+        self._parar_area_no_celular()
+        if time.monotonic() < getattr(self, "_area_proximo", 0.0):
+            return None
+        self._area_proximo = time.monotonic() + 5.0      # nao insiste
+        if not self.notif._por_jar(serial):
+            return None
+        from .notificacoes import JAR_NO_CELULAR
+        try:
+            proc = subprocess.Popen(
+                [str(self.config.adb_exe), "-s", serial, "shell",
+                 "CLASSPATH=%s app_process / scrcpyf.Area vigiar"
+                 % JAR_NO_CELULAR], stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except Exception as erro:
+            self.anotar("area: o vigia do celular nao subiu (%s)" % erro)
+            return None
+        self._area_proc, self._area_proc_serial = proc, serial
+
+        def ler():
+            for bruta in proc.stdout:
+                linha = bruta.decode("utf-8", "replace").strip()
+                if linha == "vigiando":
+                    self.anotar("area: vigiando a area de transferencia do "
+                                "celular")
+                elif linha.startswith("C "):
+                    try:
+                        texto = base64.b64decode(linha[2:]).decode("utf-8")
+                    except Exception:
+                        continue
+                    if not self.config.opcao("area_compartilhada"):
+                        continue
+                    self._area_do_celular = texto
+                    if self._area_por_no_windows(texto) and \
+                            not getattr(self, "_area_avisou_cel", False):
+                        self._area_avisou_cel = True
+                        self.anotar("area: celular -> pc funcionando")
+                elif linha.startswith("erro"):
+                    self.anotar("area: o celular disse: %s" % linha[:150])
+
+        threading.Thread(target=ler, daemon=True, name="area-celular").start()
+        return proc
+
+    def _parar_area_no_celular(self) -> None:
+        proc, self._area_proc = getattr(self, "_area_proc", None), None
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.stdin.close()             # ele sai sozinho
+                proc.terminate()
+            except Exception:
+                pass
+
+    def _vigia_area(self) -> None:
+        import base64
+        try:
+            ultimo_seq = self._area_do_windows()[0]
+        except Exception as erro:
+            self.anotar("area: o Windows nao respondeu (%s)" % erro)
+            return
+        self.anotar("area: vigiando a area de transferencia do pc")
+        enviado = None
+        try:
+            while not self._sair:
+                time.sleep(0.4)
+                if not self.config.opcao("area_compartilhada"):
+                    self._parar_area_no_celular()
+                    continue
+                try:
+                    serial = self._em_uso_pronto()
+                    proc = self._area_no_celular(serial) if serial else None
+                    import ctypes
+                    seq = ctypes.windll.user32.GetClipboardSequenceNumber()
+                    if seq == ultimo_seq:
+                        continue
+                    ultimo_seq, texto, dono = self._area_do_windows()
+                    # o que veio do celular (pelo scrcpy ou por nos) nao volta
+                    veio_do_celular = dono == "scrcpy.exe" or (
+                        dono.startswith("scrcpy-f_") and
+                        dono.endswith(".exe")) or \
+                        texto == getattr(self, "_area_do_celular", None)
+                    if veio_do_celular:
+                        enviado = texto
+                        continue
+                    if not texto or texto == enviado:
+                        continue
+                    if not serial or len(texto) > self.AREA_MAX:
+                        self.anotar("area: pc -> celular nao foi (%s)" % (
+                            "sem celular pronto" if not serial else
+                            "texto grande: %d letras" % len(texto)))
+                        continue
+                    b64 = base64.b64encode(texto.encode("utf-8")).decode(
+                        "ascii")
+                    enviado = texto
+                    if proc is not None and proc.poll() is None:
+                        proc.stdin.write(("S %s\n" % b64).encode("ascii"))
+                        proc.stdin.flush()
+                        r = "ok"
+                    else:
+                        if not self.notif._por_jar(serial):
+                            self.anotar("area: pc -> celular nao foi "
+                                        "(sem o jar)")
+                            continue
+                        from .notificacoes import JAR_NO_CELULAR
+                        r = self._shell(serial, "CLASSPATH=%s app_process / "
+                                        "scrcpyf.Area %s"
+                                        % (JAR_NO_CELULAR, b64),
+                                        espera=10).strip()
+                    if r != "ok":
+                        self.anotar("area: o celular nao aceitou (%s)"
+                                    % r[:120])
+                    elif not getattr(self, "_area_avisou", False):
+                        self._area_avisou = True        # 1x por execucao
+                        self.anotar("area: pc -> celular funcionando (dono %s)"
+                                    % (dono or "?"))
+                except Exception as erro:
+                    self.anotar("area: falhou (%s)" % erro)
+        finally:
+            self._parar_area_no_celular()
+
+    def aplicar_area_compartilhada(self, reabrir: bool = False) -> None:
+        """(08/out, pedido dele) Copiar/colar entre PC e celular (OPCOES >
+        geral). `reabrir`: o que esta no ar sobe de novo, ja com a escolha."""
+        from . import sessao as _sessao
+        _sessao.AREA_COMPARTILHADA = self.config.opcao("area_compartilhada")
+        if _sessao.AREA_COMPARTILHADA:
+            self._garantir_vigia_area()
+        if reabrir:
+            for nome in ("jogo", "extensao"):
+                self.mudou_a_qualidade(nome)
+            for pacote in self.apps_abertos():
+                self.reabrir_app(pacote)
+
+    # (08/out, pedido dele) CORRECOES POR APP ("fixes"): cada uma desligada
+    # de fabrica, menos nos apps que ja se sabe que precisam. No config do
+    # app: True = ligada, "nao" = desligada, nada = a de fabrica.
+    FIXES = ("rodinha_arrasto", "teclado_celular")
+    FIXES_DE_FABRICA = {
+        # rodinha: o Instagram rola o feed junto com os comentarios;
+        # teclado: a caixa de republicar so aparece com o teclado na janela
+        "com.instagram.android": {"rodinha_arrasto": True,
+                                  "teclado_celular": True},
+    }
+
+    def fix_do_app(self, pacote: str, chave: str) -> bool:
+        base = pacote.split(COPIA)[0]
+        v = self.config.app(pacote).get(chave)
+        if v is True or v == "sim":
+            return True
+        if v is False or v == "nao":
+            return False
+        return bool(self.FIXES_DE_FABRICA.get(base, {}).get(chave))
+
+    def fix_de_fabrica(self, pacote: str, chave: str) -> bool:
+        return bool(self.FIXES_DE_FABRICA.get(pacote.split(COPIA)[0], {})
+                    .get(chave))
+
+    _apagar_ao_subir = False             # (08/out) ver `_partida_app`
+    _acordado_apagado = threading.Event()
+
+    def _celular_dormindo(self, serial: str) -> bool:
+        """A tela do celular esta APAGADA? Dormindo (botao ou tempo) ou --
+        (08/out, relato dele) -- acordado com o painel desligado (por nos:
+        um controle que caiu deixava assim, e o app seguinte acendia)."""
+        import re
+        # (08/out, pedido dele: abrir o mais rapido possivel) o painel apagado
+        # POR NOS e uma marca daqui (o vigia sabe); perguntar ao SurfaceFlinger
+        # custava uma consulta pesada a cada abertura
+        if getattr(self, "_painel_por_nos", False):
+            return True
+        texto = self._shell(serial, "dumpsys power | grep -m1 mWakefulness=",
+                            espera=5)
+        m = re.search(r"mWakefulness=(\w+)", texto)
+        return bool(m and m.group(1) in ("Asleep", "Dozing"))
+
     def _garantir_vigia_sono(self, serial: str) -> None:
         """Sobe o vigia do sono, se ainda nao estiver no ar."""
+        # (08/out, relato dele: o Instagram pedido no segundo em que o vigia
+        # do WhatsApp saia esperou 8 s e piscou) o vigia SAINDO (pondo o
+        # celular para dormir) nao atende mais pedidos: espera ele acabar e
+        # sobe um novo
+        t = self._sono_thread
+        if t is not None and t.is_alive() and \
+                getattr(self, "_sono_saindo", False):
+            t.join(10)
         with self._sono_trava:
             t = self._sono_thread
             if t is not None and t.is_alive():
                 return
+            self._sono_saindo = False
             parar = threading.Event()
             self._sono_parar = parar
             t = threading.Thread(target=self._vigia_sono, args=(serial, parar),
@@ -1654,7 +2100,10 @@ class Programa:
         caminho_log = caminhos.pasta_relatorios() / "log_sono.txt"
         estado = {"laco": None, "controle": None, "log": None,
                   "modo": self.LACO_DO_SONO, "tela": None,
-                  "laco_desde": 0.0, "jar_vigia": True}
+                  "laco_desde": 0.0, "jar_vigia": True,
+                  # (08/out) o painel esta apagado POR NOS (o controle pode
+                  # ter caido) e o controle que falta subir (depois do app)
+                  "apagado": False, "controle_pendente": False}
 
         def subir_laco():
             try:
@@ -1763,6 +2212,7 @@ class Programa:
                                     % time.strftime("%d/%m/%Y %H:%M:%S"))
                 estado["log"].flush()
                 scr = str(self.config.scrcpy_exe)
+                self._vez_de_lancar()
                 estado["controle"] = subprocess.Popen(
                     [scr, "-s", serial, "--no-video", "--no-audio",
                      "--no-window", "--turn-screen-off", "--keep-active"],
@@ -1821,6 +2271,9 @@ class Programa:
             if not avisado:
                 acordar()
             ok = painel("on")
+            estado["apagado"] = False
+            self._painel_por_nos = False
+            estado["controle_pendente"] = False
             soltar_controle(esperar=False)
             if ok:
                 self.anotar("vigia do sono: botao com a tela apagada -> "
@@ -1830,12 +2283,19 @@ class Programa:
                 self.anotar("vigia do sono: botao com a tela apagada -> "
                             "reserva: %s" % self._acender_de_verdade(serial))
 
-        def apagar(t0: float, avisado: bool, motivo: str) -> None:
-            """QUER A TELA APAGADA com os apps rodando."""
+        def apagar(t0: float, avisado: bool, motivo: str,
+                   adiar: bool = False) -> None:
+            """QUER A TELA APAGADA com os apps rodando. `adiar`: o controle
+            (--keep-active) so sobe depois do app (ver `apagar_pedido`)."""
             if not avisado:
                 acordar()
             ok = painel("off")
-            subir_controle()      # --keep-active: nao dorme por tempo
+            estado["apagado"] = True
+            self._painel_por_nos = True
+            if adiar:
+                estado["controle_pendente"] = True
+            else:
+                subir_controle()  # --keep-active: nao dorme por tempo
             self.anotar("vigia do sono: %s -> acordado, so a tela apagada "
                         "(%s, %.2f s)" % (motivo, "painel" if ok else
                                           "pelo controle",
@@ -1849,7 +2309,13 @@ class Programa:
         tem_eventos = tem.isdigit() and int(tem) >= 1
         # (r154) O programinha do painel ja sobe aquecido ("on" com a tela
         # acesa nao muda nada): o 1o toque de verdade ja e instantaneo.
-        aquecido = painel("on", espera=6)
+        # (08/out, pedido dele: abrir app nao acende a tela do celular) Com
+        # um app pedindo a tela APAGADA, aquece com "off" (o celular ainda
+        # dorme: nao muda nada) e so entao acorda e apaga o painel na hora.
+        # (08/out, relato dele: "quando abri o instagram a tela acendeu") o
+        # "on" de aquecer acendia um painel que NOS tinhamos apagado: aquece
+        # com "ping" (carrega e nao mexe no painel)
+        aquecido = painel("ping", espera=6)
         # (r156) Vigiando pelo programinha: o laco so confere a cada 3 s.
         pelo_jar = aquecido and vigia_ok.wait(1.0)
         if not pelo_jar:
@@ -1866,7 +2332,7 @@ class Programa:
                 pass
             estado["tela"] = None
             self._shell(serial, self.TELA_MATAR, espera=5)
-            aquecido = painel("on", espera=6)
+            aquecido = painel("ping", espera=6)
         if pelo_jar:
             estado["modo"] = self.LACO_DO_SONO_ESTADO
         elif tem_eventos:
@@ -1881,8 +2347,51 @@ class Programa:
         surdo_ate = 0.0
         vazio_desde = None
         religar_em = 0.0
+
+        def apagar_pedido() -> None:
+            """(08/out) Um app abriu com o celular dormindo: acorda com o
+            painel ja desligado (a tela nao acende) e avisa quem espera."""
+            self._apagar_ao_subir = False
+            t0 = time.monotonic()
+            if estado["apagado"] and self._painel_por_nos:
+                # (08/out, relato dele: abrir o Instagram logo depois de
+                # fechar o WhatsApp acendeu a tela) o celular JA esta
+                # acordado com o painel apagado por nos: o "acordar-off" de
+                # novo era visto pelo programinha como o botao e acendia
+                self._acordado_apagado.set()
+                return
+            # (08/out, relato dele: "a tela liga e desliga") o programinha
+            # acorda e segura o painel desligado no mesmo instante
+            if painel("acordar-off", espera=5):
+                # (08/out, relato dele: o app caiu com "Server connection
+                # failed") o scrcpy de controle subindo JUNTO com o do app
+                # brigavam ao mandar o servidor ao celular: o controle sobe
+                # depois que o app subiu (`controle_pendente`)
+                estado["apagado"] = True
+                self._painel_por_nos = True
+                estado["controle_pendente"] = True
+                self.anotar("vigia do sono: app aberto com o celular apagado"
+                            " -> acordado com a tela apagada (%.2f s)"
+                            % (time.monotonic() - t0))
+            else:
+                apagar(t0, False, "app aberto com o celular apagado",
+                       adiar=True)
+            self._acordado_apagado.set()
         try:
             while not parar.is_set() and not self._sair:
+                if self._apagar_ao_subir:
+                    apagar_pedido()
+                    surdo_ate = time.monotonic() + self.SONO_SURDO_S
+                # o controle que esperava o app subir (2 s de folga)
+                if estado["controle_pendente"] and not any(
+                        n.startswith(APP) for n in list(self.ligando)):
+                    estado["pendente_desde"] = estado.get(
+                        "pendente_desde") or time.monotonic()
+                    if time.monotonic() - estado["pendente_desde"] > 2.0:
+                        estado["controle_pendente"] = False
+                        estado["pendente_desde"] = None
+                        if estado["apagado"]:
+                            subir_controle()
                 try:
                     linha = linhas.get(timeout=0.5)
                 except queue.Empty:
@@ -1899,8 +2408,13 @@ class Programa:
                     # aqui so o controle (nao dormir por tempo) acompanha.
                     partes = linha.split()
                     if partes[1] == "apagada":
+                        estado["apagado"] = True
+                        self._painel_por_nos = True
                         subir_controle()
                     elif partes[1] == "acesa":
+                        estado["apagado"] = False
+                        self._painel_por_nos = False
+                        estado["controle_pendente"] = False
                         soltar_controle(esperar=False)
                     botoes += 1
                     if botoes <= 5 or botoes % 10 == 0:
@@ -1996,14 +2510,39 @@ class Programa:
         except Exception:
             log.exception("vigia do sono quebrou")
         finally:
+            self._sono_saindo = True        # (08/out) ver `_garantir_vigia_sono`
+            self._painel_por_nos = False    # dorme (ou acende) na saida
             laco = estado["laco"]
             if laco is not None and laco.poll() is None:
                 try:
                     laco.terminate()
                 except Exception:
                     pass
-            apagada = controle_vivo()
-            if apagada:
+            # (08/out) apagado por nos, mesmo com o controle caido
+            apagada = controle_vivo() or estado["apagado"]
+            # (08/out, relato dele: "quando paro de usar ... acende e volta a
+            # desligar") Sem o espelhar no ar o celular DORME DIRETO, com o
+            # painel ainda desligado (testado no S22: dormir assim e acordar
+            # pelo botao traz a tela normal). Acender antes era a piscada.
+            dormir_direto = apagada and not self.ativo("jogo")
+            if dormir_direto:
+                # (08/out, relato dele: "depois que eu fecho +/- 2 s a tela
+                # acende") O programinha do painel e o laco vigiam o BOTAO pelo
+                # pedido de dormir -- o nosso SLEEP parecia um toque e eles
+                # acordavam o celular. Saem ANTES do SLEEP.
+                tela = estado["tela"]
+                if tela is not None and tela.poll() is None:
+                    try:
+                        tela.terminate()
+                    except Exception:
+                        pass
+                self._shell(serial, self.SONO_MATAR.replace(
+                    " ; " + self.SONO_MATAR_CONTROLE, "") + " ; " +
+                    self.TELA_MATAR, espera=5)
+                self._shell(serial, "cmd input keyevent KEYCODE_SLEEP",
+                            espera=5)
+                time.sleep(0.4)
+            elif apagada:
                 painel("on", espera=1.5)
             soltar_controle()
             tela = estado["tela"]
@@ -2014,10 +2553,10 @@ class Programa:
                     pass
             self._shell(serial, self.SONO_MATAR + " ; " + self.TELA_MATAR,
                         espera=5)                           # laco (r133)
-            if apagada and not self.ativo("jogo"):
-                # O celular dorme como se ele tivesse apertado o botao.
-                self._shell(serial, "cmd input keyevent KEYCODE_SLEEP",
-                            espera=5)
+            if dormir_direto:
+                # dormiu la em cima; o scrcpy de controle saiu com a tela
+                # apagada e nao a acende (ele so restaura com a tela ligada)
+                pass
             if estado["log"] is not None:
                 try:
                     estado["log"].close()
@@ -2064,6 +2603,48 @@ class Programa:
         larg, _alt, tela = achados[-1]
         return tela, int(larg)
 
+    def _rodinha_alvos(self, apps, cache: dict) -> dict:
+        """(08/out) pid -> (serial, tela, largura, altura) das janelas de app
+        com a correcao "rodinha como arrasto" ligada."""
+        import re
+        alvos = {}
+        for nome, s in apps:
+            pacote = nome[len(APP):]
+            pid = getattr(s, "pid", 0)
+            if not pid or not self.fix_do_app(pacote, "rodinha_arrasto"):
+                continue
+            chave = (nome, pid)
+            info = cache.get(chave)
+            if info is None:
+                try:
+                    with open(s.arquivo_log, encoding="utf-8",
+                              errors="replace") as arq:
+                        achados = re.findall(
+                            r"New display: (\d+)x(\d+)\S*\s*\(id=(\d+)\)",
+                            arq.read())
+                except Exception:
+                    achados = []
+                if not achados:
+                    continue
+                larg, alt, tela = achados[-1]
+                info = cache[chave] = (getattr(s, "serial", "") or "", tela,
+                                       int(larg), int(alt))
+            alvos[pid] = info
+        return alvos
+
+    def _rodinha(self):
+        r = getattr(self, "_rodinha_obj", None)
+        if r is None:
+            from .rodinha import Rodinha
+
+            def mandar(serial, comando):
+                if not self._pela_conversa(serial, comando):
+                    threading.Thread(target=self._shell,
+                                     args=(serial, comando, 5),
+                                     daemon=True).start()
+            r = self._rodinha_obj = Rodinha(mandar)
+        return r
+
     def _vigia_foco(self, serial: str) -> None:
         from . import janela_scrcpy
         telas: dict = {}
@@ -2071,6 +2652,7 @@ class Programa:
         candidato, desde = None, 0.0
         vazio_desde = None
         vezes = 0
+        rodinha_em, rodinha_cache = 0.0, {}
         self.anotar("vigia do foco: no ar")
         try:
             while not self._sair:
@@ -2078,6 +2660,14 @@ class Programa:
                 agora = time.monotonic()
                 apps = [(n, s) for n, s in list(self.sessoes.items())
                         if n.startswith(APP)]
+                # (08/out) a rodinha como arrasto: quem tem a correcao
+                if agora >= rodinha_em:
+                    rodinha_em = agora + 1.0
+                    try:
+                        self._rodinha().atualizar(
+                            self._rodinha_alvos(apps, rodinha_cache))
+                    except Exception:
+                        log.exception("rodinha: nao atualizei")
                 if not apps and not any(n.startswith(APP)
                                         for n in list(self.ligando)):
                     vazio_desde = vazio_desde or agora
@@ -2110,8 +2700,16 @@ class Programa:
                 ultimo = nome
                 tela, larg = info
                 x = max(0, larg - 2)
-                comando = ("input -d %s motionevent DOWN %d 2; "
-                           "input -d %s motionevent CANCEL %d 2"
+                # (08/out, checagem no S22: o foco do Android e um so, e o
+                # toque o levava para a janela do PC) Se o teclado esta aberto
+                # NA TELA DO CELULAR (ele esta digitando nele), nao toca: o
+                # celular nao perde o campo. Decidido la mesmo, numa ida so.
+                comando = ("d=$(dumpsys input_method); "
+                           "if echo \"$d\" | grep -q 'mInputShown=true' && "
+                           "echo \"$d\" | grep -qE "
+                           "'mDisplayIdToShowIme=0( |$)'; then :; else "
+                           "input -d %s motionevent DOWN %d 2; "
+                           "input -d %s motionevent CANCEL %d 2; fi"
                            % (tela, x, tela, x))
                 if not self._pela_conversa(serial, comando):     # (r139)
                     threading.Thread(target=self._shell,
@@ -2123,6 +2721,10 @@ class Programa:
                                 "%dx)" % (nome[len(APP):], tela, vezes))
         except Exception:
             log.exception("vigia do foco quebrou")
+        try:
+            self._rodinha().atualizar({})        # sem app: sem gancho
+        except Exception:
+            pass
         self.anotar("vigia do foco: saiu")
 
     # ANIMACOES 4x MAIS RAPIDAS COM APP EM JANELA (pedido dele, 23/set/2026).
@@ -2513,9 +3115,7 @@ class Programa:
         if not ident:
             return None
         pasta = caminhos.pasta_dados() / "celulares" / ident
-        try:
-            (pasta / "icones").mkdir(parents=True, exist_ok=True)
-        except Exception:
+        if not caminhos.garantir_pasta(pasta / "icones", pais=True):
             return None
         return pasta
 
@@ -2524,10 +3124,7 @@ class Programa:
         if cel is not None:
             return cel / "icones"
         pasta = caminhos.pasta_dados() / "icones"
-        try:
-            pasta.mkdir(exist_ok=True)
-        except Exception:
-            pass
+        caminhos.garantir_pasta(pasta)
         return pasta
 
     @staticmethod
@@ -2668,6 +3265,428 @@ class Programa:
         self.anotar("cache %s: %d mudaram, %d sairam, %d icones pedidos"
                     % (ident, len(mudaram) if antes else -1, len(sairam),
                        len(faltam)))
+        self._ler_sinais(serial, apps, agora)
+        # (08/out, pedido dele) a VERIFICACAO e AUTOMATICA: ao conectar, o que
+        # falta (1a vez: todos; depois so os novos/atualizados). O resultado
+        # fica em interface.json (por versao): da proxima vez ja carrega.
+        dados = self.interface_dos_apps()
+        from . import analise_app
+        if sairam or any((dados.get(p) or {}).get("v") != agora.get(p, "") or
+                         ((dados.get(p) or {}).get("resultado") ==
+                          analise_app.TABLET and
+                          (dados.get(p) or {}).get("real_v") !=
+                          agora.get(p, ""))
+                         for _n, p, _s in apps if p != DEX and COPIA not in p):
+            self.analisar_apps(so_faltam=True, serial=serial, versoes=agora)
+        self._conferir_depois(serial)
+
+    # -- (08/out, pedido dele) MELHOR MODO DE CADA APP (melhor_modo.py) -------
+
+    def _arquivo_sinais(self):
+        pasta = self.pasta_do_celular()
+        return pasta / "sinais.json" if pasta is not None else None
+
+    def sinais_dos_apps(self) -> dict:
+        """{pacote: sinal} do celular em uso (lido do disco uma vez)."""
+        arq = self._arquivo_sinais()
+        guardado = getattr(self, "_sinais", None)
+        if guardado is not None and guardado[0] == arq:
+            return guardado[1]
+        import json
+        dados = {}
+        try:
+            if arq is not None and arq.exists():
+                dados = json.loads(arq.read_text(encoding="utf-8")) or {}
+        except Exception:
+            dados = {}
+        self._sinais = (arq, dados)
+        return dados
+
+    def _ler_sinais(self, serial: str, apps, versoes: dict) -> None:
+        """Os sinais (jogo, categoria, motor) dos apps sem sinal ou que
+        mudaram de versao. Numa conversa so; roda na thread do cache."""
+        import json
+        from . import melhor_modo
+        sinais = dict(self.sinais_dos_apps())
+        pacotes = sorted({a[1].split(COPIA)[0] for a in apps
+                          if a[1] != DEX})
+        faltam = [p for p in pacotes
+                  if (sinais.get(p) or {}).get("v") != versoes.get(p, "")]
+        sairam = [p for p in sinais if p not in pacotes]
+        if not faltam and not sairam:
+            return
+        t0 = time.monotonic()
+        if faltam:
+            saida = self._shell(serial, melhor_modo.roteiro_de_leitura(faltam),
+                                espera=120)
+            novos = melhor_modo.ler_saida(saida, versoes)
+            if not novos:
+                self.anotar("melhor modo: o celular nao respondeu os sinais")
+                return
+            sinais.update(novos)
+        for p in sairam:
+            sinais.pop(p, None)
+        arq = self._arquivo_sinais()
+        try:
+            if arq is not None:
+                arq.write_text(json.dumps(sinais, ensure_ascii=False),
+                               encoding="utf-8")
+        except Exception as erro:
+            self.anotar("melhor modo: nao gravei os sinais (%s)" % erro)
+        self._sinais = (arq, sinais)
+        jogos = sorted(p for p in sinais if melhor_modo.tipo_do_app(
+            p, sinais[p])[0] == melhor_modo.JOGO)
+        self.anotar("melhor modo: %d apps lidos em %.1f s; jogos: %s" % (
+            len(faltam), time.monotonic() - t0, ", ".join(jogos) or "nenhum"))
+        self.apps_versao = getattr(self, "apps_versao", 0) + 1
+
+    # -- (08/out, pedido dele) ANALISE DA INTERFACE (analise_app.py): o botao
+    # "verificar apps" le a tabela de telas de cada APK no celular. Guardado
+    # por versao em <celular>\interface.json; depois da 1a vez, app novo ou
+    # atualizado e analisado sozinho ao conectar.
+
+    def _arquivo_interface(self):
+        pasta = self.pasta_do_celular()
+        return pasta / "interface.json" if pasta is not None else None
+
+    def interface_dos_apps(self) -> dict:
+        arq = self._arquivo_interface()
+        guardado = getattr(self, "_interface", None)
+        if guardado is not None and guardado[0] == arq:
+            return guardado[1]
+        import json
+        dados = {}
+        try:
+            if arq is not None and arq.exists():
+                dados = json.loads(arq.read_text(encoding="utf-8")) or {}
+        except Exception:
+            dados = {}
+        self._interface = (arq, dados)
+        return dados
+
+    def _gravar_interface(self, dados: dict) -> None:
+        import json
+        arq = self._arquivo_interface()
+        # (08/out) a conferencia gravada no disco por OUTRO lado (outra
+        # execucao) nao se perde: o que falta aqui vem de la
+        try:
+            if arq is not None and arq.exists():
+                disco = json.loads(arq.read_text(encoding="utf-8")) or {}
+                for p, a in disco.items():
+                    m = dados.get(p)
+                    if isinstance(a, dict) and isinstance(m, dict) and \
+                            a.get("real") and not m.get("real") and \
+                            a.get("v") == m.get("v"):
+                        m["real"], m["real_v"] = a["real"], a.get("real_v")
+        except Exception:
+            pass
+        try:
+            if arq is not None:
+                arq.write_text(json.dumps(dados, ensure_ascii=False),
+                               encoding="utf-8")
+        except Exception as erro:
+            self.anotar("analise: nao gravei (%s)" % erro)
+        self._interface = (arq, dados)
+
+    analise_estado = None       # None | {"feitos", "total", "app", "fim"...}
+
+    def analisar_apps(self, so_faltam: bool = False, serial: str = "",
+                      versoes: dict | None = None) -> bool:
+        """Comeca a analise (thread). False = ja rodando ou sem celular."""
+        if self.analise_estado is not None and \
+                not self.analise_estado.get("fim"):
+            return False
+        serial = serial or self._em_uso_pronto()
+        apps = [a for a in (getattr(self, "apps_do_celular", None) or [])
+                if a[1] != DEX and COPIA not in a[1]]
+        if not serial or not apps:
+            return False
+        self.analise_estado = {"feitos": 0, "total": 0, "app": "",
+                               "fim": False, "cancelar": False}
+        threading.Thread(target=self._analisar, args=(serial, apps,
+                                                      so_faltam, versoes),
+                         daemon=True, name="analise-apps").start()
+        return True
+
+    def cancelar_analise(self) -> None:
+        if self.analise_estado is not None:
+            self.analise_estado["cancelar"] = True
+
+    def _analisar(self, serial: str, apps, so_faltam: bool,
+                  versoes: dict | None = None) -> None:
+        import subprocess
+        from . import analise_app
+        estado = self.analise_estado
+        versoes = versoes or self._assinatura(serial) or {}
+        dados = dict(self.interface_dos_apps())
+        # desinstalados saem do guardado
+        for p in [k for k in dados if not k.startswith("_") and versoes and
+                  k not in versoes]:
+            dados.pop(p)
+        fila = [(n, p) for n, p, _s in apps
+                if not so_faltam or (dados.get(p) or {}).get("v") !=
+                versoes.get(p, "")]
+        estado["total"] = len(fila)
+        t0 = time.monotonic()
+        contagem = {}
+        adb = str(self.config.adb_exe)
+        sem_janela = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        for nome, pacote in fila:
+            if estado.get("cancelar") or self._sair:
+                break
+            estado["app"] = nome
+            try:
+                caminho = self._shell(serial, "pm path %s | head -1"
+                                      % pacote, espera=10).strip()
+                caminho = caminho.split(":", 1)[-1].strip()
+                r = subprocess.run(
+                    [adb, "-s", serial, "exec-out",
+                     "unzip -p '%s' resources.arsc" % caminho],
+                    capture_output=True, timeout=90,
+                    creationflags=sem_janela)
+                c = analise_app.conclusao(analise_app.ler_tabela(r.stdout))
+                c["v"] = versoes.get(pacote, "")
+                dados[pacote] = c
+                contagem[c["resultado"]] = contagem.get(c["resultado"], 0) + 1
+            except Exception as erro:
+                self.anotar("analise %s: falhou (%s)" % (pacote, erro))
+            estado["feitos"] += 1
+            if estado["feitos"] % 10 == 0:
+                self._gravar_interface(dados)      # o que ja tem nao se perde
+        # (08/out, relato dele: apps "de tablet" abrindo com a tela de celular
+        # esticada) a CONFERENCIA DE VERDADE de quem a tabela diz tablet: o
+        # app aberto escondido nos dois formatos (`_conferir_tablet`)
+        conferir = [(n, p) for n, p, _s in apps
+                    if (dados.get(p) or {}).get("resultado") ==
+                    analise_app.TABLET and
+                    (dados.get(p) or {}).get("real_v") != versoes.get(p, "")]
+        if conferir and self._scrcpy_aceita("--new-display") and \
+                self._scrcpy_aceita("--no-window"):
+            estado["total"] += len(conferir)
+            for nome, pacote in conferir:
+                if estado.get("cancelar") or self._sair:
+                    break
+                if self._ocupado_com_o_celular():
+                    self.anotar("conferencia: o programa esta usando o "
+                                "celular; o resto fica para depois")
+                    break
+                # (teste no S22) com o celular DORMINDO o Android congela os
+                # apps: a tela sai sem montar, com tarja falsa ou nem abre.
+                # So confere acordado (ele usando, ou com janela de app
+                # aberta: o vigia do sono o mantem acordado de tela apagada);
+                # o resto fica para a proxima vez (`_conferir_depois`).
+                if "Awake" not in (self._shell(
+                        serial, "dumpsys power | grep mWakefulness=",
+                        espera=10) or ""):
+                    self.anotar("conferencia: celular dormindo, %d ficam "
+                                "para depois" % (estado["total"] -
+                                                 estado["feitos"]))
+                    break
+                estado["app"] = nome
+                try:
+                    real = self._conferir_tablet(serial, pacote,
+                                                 dados[pacote])
+                    if real:
+                        dados[pacote]["real"] = real
+                        dados[pacote]["real_v"] = versoes.get(pacote, "")
+                        contagem["tablet " + real] = \
+                            contagem.get("tablet " + real, 0) + 1
+                except Exception as erro:
+                    self.anotar("conferencia %s: falhou (%s)"
+                                % (pacote, erro))
+                estado["feitos"] += 1
+                self._gravar_interface(dados)
+        # cancelada no meio: o resto fica para a proxima conexao
+        if not estado.get("cancelar"):
+            dados["_feito"] = True
+        self._gravar_interface(dados)
+        estado["fim"] = True
+        estado["contagem"] = contagem
+        self.anotar("analise: %d de %d apps em %.0f s%s -- %s" % (
+            estado["feitos"], estado["total"], time.monotonic() - t0,
+            " (cancelada)" if estado.get("cancelar") else "",
+            ", ".join("%s %d" % kv for kv in sorted(contagem.items()))))
+        self.apps_versao = getattr(self, "apps_versao", 0) + 1
+
+    # (08/out, relato dele: o Instagram caiu ao abrir -- "Server connection
+    # failed", o servidor "Aborted") dois scrcpy subindo no MESMO instante
+    # gravam o mesmo scrcpy-server no celular e um le o arquivo pela metade.
+    # Entre duas subidas, uma folga que cobre o envio e o carregar do servidor.
+    _LANCAR_TRAVA = threading.Lock()
+    _ultimo_lancamento = 0.0
+    FOLGA_ENTRE_SCRCPY_S = 1.2
+
+    def _vez_de_lancar(self) -> None:
+        with Programa._LANCAR_TRAVA:
+            espera = (Programa._ultimo_lancamento + self.FOLGA_ENTRE_SCRCPY_S
+                      - time.monotonic())
+            if espera > 0:
+                time.sleep(espera)
+            Programa._ultimo_lancamento = time.monotonic()
+
+    def _conferencia_pendente(self) -> bool:
+        from . import analise_app
+        return any(isinstance(a, dict) and
+                   a.get("resultado") == analise_app.TABLET and
+                   a.get("real_v") != a.get("v")
+                   for a in self.interface_dos_apps().values())
+
+    def _ocupado_com_o_celular(self) -> bool:
+        """Alguma sessao do programa no ar ou subindo."""
+        return bool(self.sessoes or self.ligando)
+
+    def _conferir_depois(self, serial: str) -> None:
+        """(08/out) A conferencia so roda com o celular ACORDADO e o programa
+        SEM nada no ar (relato dele: com ela rodando junto, a abertura do
+        Instagram caiu). A cada 60 s olha se da; acaba quando nao falta
+        nenhum app."""
+        t = getattr(self, "_conferir_thread", None)
+        if t is not None and t.is_alive():
+            return
+
+        def laco():
+            while not self._sair and self._conferencia_pendente():
+                time.sleep(60)
+                if self._em_uso_pronto() != serial or \
+                        self._ocupado_com_o_celular() or \
+                        (self.analise_estado is not None and
+                         not self.analise_estado.get("fim")):
+                    continue
+                if "Awake" not in (self._shell(
+                        serial, "dumpsys power | grep mWakefulness=",
+                        espera=10) or ""):
+                    continue
+                if self.analisar_apps(so_faltam=True, serial=serial):
+                    while not self._sair and self.analise_estado and \
+                            not self.analise_estado.get("fim"):
+                        time.sleep(2)
+
+        self._conferir_thread = threading.Thread(
+            target=laco, daemon=True, name="conferir-depois")
+        self._conferir_thread.start()
+
+    def _conferir_tablet(self, serial: str, pacote: str, analise: dict) -> str:
+        """(08/out) Abre o app ESCONDIDO (tela virtual sem janela, sem som,
+        sem acender o celular) no formato de celular e no de tablet que o
+        modo pc usaria, e compara as telas montadas
+        (`analise_app.conferencia`). Sem som do app enquanto isso (appops
+        PLAY_AUDIO, devolvido no fim). "" = nao deu para conferir."""
+        import re
+        import subprocess
+        from . import analise_app, formatos, melhor_modo
+        # App ja aberto (no celular, numa janela ou nos recentes): abrir de
+        # novo levaria a tarefa DELE para a tela escondida e o fim a fecharia.
+        # Fica para a proxima conexao.
+        if re.search(r"taskId=\d+: %s/" % re.escape(pacote),
+                     self._shell(serial, "am stack list", espera=10) or ""):
+            self.anotar("conferencia %s: aberto no celular, fica para depois"
+                        % pacote)
+            return ""
+        cel = self.celular or {}
+        dp = melhor_modo.largura_do_tablet(analise)
+        l, a, d, _p = formatos.tela_app("pc", 720, True, cel, dp)
+        formatos_ = (("cel", 720, 1560, 320), ("tab", l, a, d))
+        sem_janela = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        som = self._shell(serial, "appops get %s PLAY_AUDIO" % pacote,
+                          espera=10) or ""
+        self._shell(serial, "appops set %s PLAY_AUDIO ignore" % pacote,
+                    espera=10)
+        telas = {}
+        t0 = time.monotonic()
+        try:
+            for nome, w, h, dpi in formatos_:
+                if self._sair:
+                    return ""
+                self._vez_de_lancar()
+                proc = subprocess.Popen(
+                    [str(self.config.scrcpy_exe), "-s", serial, "--no-audio",
+                     "--no-window", "--no-power-on", "--record=NUL",
+                     "--record-format=mkv", "--max-fps=5",
+                     "--new-display=%dx%d/%d" % (w, h, dpi),
+                     "--no-vd-system-decorations", "--start-app=" + pacote],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    cwd=str(self.config.scrcpy_exe.parent),
+                    creationflags=sem_janela)
+                try:
+                    fim = time.monotonic() + 15
+                    while time.monotonic() < fim:
+                        linha = proc.stdout.readline().decode(
+                            "utf-8", "replace")
+                        if not linha or "New display" in linha:
+                            break
+                    # espera a tela do app ficar parada (ate ~9 s)
+                    antes, pecas = None, {}
+                    for vez in range(10):
+                        time.sleep(1.0)
+                        pecas = analise_app.pecas_da_tela(
+                            self._shell(serial, "dumpsys activity top",
+                                        espera=15) or "", pacote, w, h)
+                        marca = (pecas["achou"], len(pecas["ids"]),
+                                 pecas["views"])
+                        if pecas["achou"] and marca == antes and vez >= 3:
+                            break
+                        antes = marca
+                    telas[nome] = pecas
+                finally:
+                    tarefas = self._shell(serial, "am stack list",
+                                          espera=10) or ""
+                    for tid in set(re.findall(r"taskId=(\d+): %s/"
+                                              % re.escape(pacote), tarefas)):
+                        self._shell(serial, "am stack remove %s" % tid,
+                                    espera=10)
+                    proc.kill()
+                    # (08/out, achado: uma tela escondida com o 99 ficou 38 min
+                    # de pe) o servidor no celular nem sempre percebe o PC
+                    # saindo: derrubado la tambem (a tela some junto)
+                    self._shell(serial, "pkill -f 'max_fps=5 power_on=false "
+                                "new_display=%dx%d/%d' ; true" % (w, h, dpi),
+                                espera=10)
+                    time.sleep(0.8)
+        finally:
+            m = re.search(r"PLAY_AUDIO: (\w+)", som)
+            volta = m.group(1) if m else "default"
+            self._shell(serial, "appops set %s PLAY_AUDIO %s"
+                        % (pacote, volta), espera=10)
+        real = analise_app.conferencia(telas.get("cel") or {},
+                                       telas.get("tab") or {})
+        self.anotar("conferencia %s: %s em %.0f s (celular %d ids, tablet "
+                    "%dx%d/%d %d ids%s%s)" % (
+                        pacote, real, time.monotonic() - t0,
+                        len((telas.get("cel") or {}).get("ids") or ()), l, a,
+                        d, len((telas.get("tab") or {}).get("ids") or ()),
+                        "" if (telas.get("tab") or {}).get("cheia", True)
+                        else ", com tarja",
+                        ", em colunas" if (telas.get("tab") or {}).get(
+                            "colunas") else ""))
+        return real
+
+    def melhor_auto(self) -> bool:
+        # (08/out, rework) sempre ligado: o modo sai da verificacao
+        return True
+
+    def verificacao_feita(self) -> bool:
+        return bool(self.interface_dos_apps().get("_feito"))
+
+    def melhor_do_app(self, pacote: str, serial: str = ""):
+        """A recomendacao do app ({tipo, porque, janela, pc, analise}) ou
+        None (DeX)."""
+        from . import melhor_modo
+        if pacote == DEX:
+            return None
+        base = pacote.split(COPIA)[0]
+        return melhor_modo.recomendacao(base, self.sinais_dos_apps().get(base),
+                                        self.celular or {},
+                                        self.conexao_de(serial),
+                                        self.interface_dos_apps().get(base))
+
+    def config_efetiva(self, pacote: str, serial: str = "") -> dict:
+        """O que vale para o app: o automatico por baixo, o personalizado
+        dele por cima (`melhor_modo.mesclar`)."""
+        from . import melhor_modo
+        return melhor_modo.mesclar(self.config.app(pacote),
+                                   self.melhor_do_app(pacote, serial),
+                                   self.config.apps.get("modo") or "pc")
 
     def _desenhar_icone_dex(self) -> None:
         """Reserva do icone do DeX: um monitor branco num quadrado azul.
@@ -2838,6 +3857,7 @@ class Programa:
         o laco -- quem troca poe o app nela e a janela no lugar. None = nao
         subiu.
         """
+        t0 = time.monotonic()      # (08/out) o tempo do pedido ao scrcpy
         try:
             alvo = serial or self._achar_celular()
             if not alvo:
@@ -2860,20 +3880,15 @@ class Programa:
             # qualidade (ja veio no perfil_para_subir). O app personalizado
             # (APPS > personalizados) pode trocar a predefinicao e cada
             # fileira; vazio = "padrao" (segue opcoes).
-            deste = self.config.app(pacote)
+            # (08/out) com o MELHOR MODO por baixo do que ele escolheu
+            deste = self.config_efetiva(pacote, alvo)
             from . import qualidade
             import copy
-            audio_q = None
-            video_p = None
-            # (r196) A predefinicao propria do app, da conexao desta sessao.
-            propria = deste.get(qualidade.CHAVES_PREDEF[
-                self.conexao_de(alvo)])
-            if propria:
-                video_p, audio_q = qualidade.valores_da_predef(
-                    self.config.qualidade, propria)
-                qualidade.aplicar_no_perfil(perfil, video_p, None)
-            for campo, valor in (deste.get("video_fino") or {}).items():
-                qualidade.escrever(perfil, "video", campo, valor)
+            # (08/out, rework) o NIVEL e o SOM do app (senao os gerais)
+            q = self.config.qualidade
+            audio_q = qualidade.audio_do_som(qualidade.som_de(deste, q))
+            qualidade.aplicar_no_perfil(perfil, qualidade.video_do_nivel(
+                qualidade.nivel_de(deste, q)), None)
             self._resolucao_no_perfil(perfil)               # (r189)
             # ONDE O SOM TOCA: o do app, senao o de APPS > ajustes; de
             # fabrica o som fica no celular (varias janelas nao dividem o
@@ -2887,8 +3902,6 @@ class Programa:
                 audio["exigir"] = False
                 perfil["audio"] = audio
                 qualidade.aplicar_no_perfil(perfil, None, audio_q)
-                for campo, valor in (deste.get("audio_fino") or {}).items():
-                    qualidade.escrever(perfil, "audio", campo, valor)
             qualidade.aplicar_onde(perfil, onde)
             perfil["sessao"] = {}
             # TELA CHEIA (r135): o --fullscreen do scrcpy; a posicao que vai
@@ -2930,7 +3943,9 @@ class Programa:
                 # - e se o app sair mesmo assim (voltar demais), o
                 #   `_manter_no_app` abre ele de novo na mesma tela.
                 extras = ["--new-display", "--no-vd-system-decorations",
-                          "--mouse-bind=b-b-:b-b-", "--shortcut-mod=rsuper"]
+                          "--mouse-bind=b-b-:b-b-", "--shortcut-mod=rsuper",
+                          # (08/out) quem acende/apaga e o vigia do sono
+                          "--no-power-on"]
                 # (r141) O TECLADO DO CELULAR DENTRO DA JANELA (pedido dele,
                 # 25/set/2026: no Instagram a caixa de texto so aparece
                 # junto do teclado, que nao ia para a tela virtual). So
@@ -2951,8 +3966,11 @@ class Programa:
                 # pedido dele) OPCAO POR APP, desligada de fabrica: o
                 # teclado do celular desenhado na janela ("local") -- o unico
                 # jeito em que a caixa do repost do Instagram aparece.
-                POLITICA_TECLADO = "local" if deste.get("teclado_celular") \
-                    else ""
+                # (08/out, checagem no S22: sem politica o teclado abria NA
+                # TELA DO CELULAR ao tocar num campo da janela) "hide" = o
+                # teclado da tela nao aparece em lugar nenhum; o do PC digita.
+                POLITICA_TECLADO = "local" if self.fix_do_app(
+                    pacote, "teclado_celular") else "hide"
                 if POLITICA_TECLADO and \
                         self._scrcpy_aceita("--display-ime-policy"):
                     extras.append("--display-ime-policy=" + POLITICA_TECLADO)
@@ -2979,19 +3997,41 @@ class Programa:
                            "--window-y=%d" % lugar[1]]
                 if not tela_cheia:
                     extras.append("--window-height=%d" % lugar[3])
+            elif pacote != DEX and not tela_cheia and tamanho and \
+                    tamanho.get("janela"):
+                # (08/out) a janela do tamanho de 720p em qualquer nivel
+                extras += ["--window-width=%d" % tamanho["janela"][0],
+                           "--window-height=%d" % tamanho["janela"][1]]
             # TELA APAGADA = APP SEM IMAGEM (pedido dele, 23/set/2026): com o
             # celular dormindo o Android pausa os apps em todas as telas,
             # inclusive a virtual. Acende antes de abrir; o vigia do sono
             # mantem acordado enquanto houver janela de app.
             if not troca:       # na troca o app ja esta aberto: acordado
-                acordar = "cmd input keyevent KEYCODE_WAKEUP"
-                if not self._pela_conversa(alvo, acordar):       # (r139)
-                    self._shell(alvo, acordar, espera=5)
+                # (08/out, pedido dele: mexer no PC nao acende a tela do
+                # celular) Dormindo: o vigia do sono acorda com o PAINEL
+                # APAGADO (o app roda, a tela fica preta). Acordado: o de
+                # sempre (o WAKEUP nao muda nada).
+                if self._celular_dormindo(alvo):
+                    # (08/out, pedido dele: abrir o mais rapido possivel) a
+                    # janela sobe JUNTO com o acordar apagado (antes esperava
+                    # o vigia, ~2 s); o scrcpy do app vai com --no-power-on
+                    self._acordado_apagado.clear()
+                    self._apagar_ao_subir = True
+                    threading.Thread(target=self._garantir_vigia_sono,
+                                     args=(alvo,), daemon=True,
+                                     name="vigia-sono-sobe").start()
+                else:
+                    acordar = "cmd input keyevent KEYCODE_WAKEUP"
+                    if not self._pela_conversa(alvo, acordar):   # (r139)
+                        self._shell(alvo, acordar, espera=5)
             # Na troca a velha ainda escreve no log dela: a nova usa o outro
             # nome (os dois se revezam, como no espelhar).
             nome_log = "log_app_%s.txt" % seguro
             if troca and str(log_velho).endswith(nome_log):
                 nome_log = "log_app_%s_2.txt" % seguro
+            self._vez_de_lancar()
+            self.anotar("app %s: scrcpy chamado %d ms depois do pedido" % (
+                pacote, (time.monotonic() - t0) * 1000))
             ok = sessao.iniciar(exe_app, alvo, perfil,
                                 caminhos.pasta_relatorios(), icone=icone_app,
                                 extras=extras, nome_log=nome_log,
@@ -3007,6 +4047,15 @@ class Programa:
             if self._sair:
                 sessao.parar()
                 return None
+            # (07/out) MODO PC: o app ainda nao visto -> confere se ele
+            # encheu a tela ou ficou com tarja (jogo que so roda deitado).
+            if pacote != DEX and tamanho and tamanho.get("conferir"):
+                threading.Thread(target=self._conferir_orientacao,
+                                 args=(alvo, pacote, sessao,
+                                       tamanho["deitado"],
+                                       tamanho.get("largura_dp", 0)),
+                                 daemon=True,
+                                 name="orientacao-%s" % pacote).start()
             if troca:
                 return sessao
             self.pedidos.put(("subiu", nome, sessao))
@@ -3035,37 +4084,157 @@ class Programa:
         "lado": lado maior ou 0, "nota": para o registro}. None = a de
         sempre (tamanho do celular).
         """
-        from . import formatos
+        from . import formatos, qualidade
         cel = self.celular or {}
-        formato = deste.get("formato") or self.config.apps.get("formato") \
-            or formatos.PADRAO
+        apps = self.config.apps
+        # (08/out, rework) A TELA VIRTUAL sai do MODO (pc so com a
+        # verificacao), da RESOLUCAO DO NIVEL e da orientacao; a densidade,
+        # da resolucao (pc: a largura do tablet do app; celular: a do
+        # aparelho).
+        modo = deste.get("modo") or "celular"
         try:
-            p = int(deste.get("resolucao") or 0)
+            largura_dp = int(deste.get("sw_dp") or 0) if modo == "pc" else 0
         except (TypeError, ValueError):
-            p = 0
-        if formatos.e_celular(formato) and not p:
-            return None                       # como sempre foi
-        possiveis = formatos.possiveis(formato, cel)
-        if not p:
-            # Resolucao "celular": a da tela do aparelho (lado curto), ou a
-            # maior abaixo dela que o celular aguenta nesse formato.
-            t = formatos.tela_do_celular(cel)
-            teto = t[0] if t else 1080
-            p = next((x for x in possiveis if x <= teto), possiveis[-1])
-        elif p not in possiveis:
-            menor = next((x for x in possiveis if x <= p), possiveis[-1])
+            largura_dp = 0
+        # (08/out, rework) A ORIENTACAO e sempre automatica (a que o programa
+        # reconheceu; nao sabida = o palpite e confere). (08/out, teste do
+        # WhatsApp) ela so vale para a LARGURA em que foi vista: com a tela
+        # estreita demais o app abre o layout de celular e trava em pe; com a
+        # largura nova ele e conferido de novo.
+        sabido = (apps.get("orientacao") or {}).get(pacote)
+        if sabido and (apps.get("orient_dp") or {}).get(pacote) != largura_dp:
+            sabido = None
+        deitado, conferir = sabido == "deitado", not sabido
+        # (08/out) no modo pc o palpite e DEITADO (o formato do monitor; o
+        # app que so roda em pe e conferido e reaberto em pe uma vez)
+        if not sabido and (deste.get("forma_auto") == "deitado" or
+                           modo == "pc"):
+            deitado = True
+        if modo != "pc" and not formatos.tela_do_celular(cel):
+            return None                       # sem o celular lido
+        p = qualidade.P_DO_NIVEL[qualidade.nivel_de(deste,
+                                                    self.config.qualidade)]
+        # (09/out, pedido dele) o tamanho do app: o dele, senao o de todos
+        escala = formatos.TAMANHOS.get(
+            self.config.app(pacote).get("escala") or apps.get("escala")
+            or "normal", 1.0)
+        l, a, dpi, usado = formatos.tela_app(modo, p, deitado, cel,
+                                             largura_dp, escala)
+        if usado != p:
             self.anotar("app %s: %dp nao cabe no celular; vai %dp"
-                        % (pacote, p, menor))
-            p = menor
-        t = formatos.tamanho(formato, p, cel)
-        if not t:
-            return None
-        dpi = formatos.densidade(p, cel)
-        return {"opcao": "--new-display=%dx%d%s" % (
-                    t[0], t[1], "/%d" % dpi if dpi else ""),
-                "lado": max(t),
-                "nota": "tela virtual %dx%d (%s %dp)" % (
-                    t[0], t[1], formatos.rotulo(formato), p)}
+                        % (pacote, p, usado))
+        # (08/out, pedido dele: "a dpi tem que acompanhar a resolucao pra
+        # manter tudo no tamanho correto") a JANELA nasce do tamanho que teria
+        # em 720p, em qualquer nivel: o layout (dp) e o mesmo, entao a
+        # resolucao so muda a NITIDEZ (antes 1080p abria a janela enorme e
+        # 540p pequena). Cabe em 90% da area do monitor.
+        l7, a7, _d7, _u7 = formatos.tela_app(modo, 720, l > a, cel,
+                                             largura_dp)
+        janela = self._caber_no_monitor(l7, a7)
+        return {"opcao": "--new-display=%dx%d/%d" % (l, a, dpi),
+                "lado": max(l, a), "modo": modo, "deitado": l > a,
+                "conferir": conferir, "largura_dp": largura_dp,
+                "janela": janela,
+                "nota": "tela virtual %dx%d/%d (modo %s, %dp, %s%s%s)" % (
+                    l, a, dpi, modo, usado, "deitado" if l > a else "em pe",
+                    (", layout %d dp" % largura_dp) if modo == "pc" and
+                    largura_dp else "",
+                    (", tamanho x%.2f" % escala) if escala != 1.0 else "")}
+
+    def _caber_no_monitor(self, l: int, a: int):
+        """(largura, altura) de `l x a` reduzida para caber em 90% da area
+        util do monitor principal (mesma proporcao)."""
+        try:
+            from . import monitores
+            lista = monitores.listar()
+            m = next((x for x in lista if x.get("principal")),
+                     lista[0] if lista else None)
+            ml, ma = (m["l"], m["a"]) if m else (1920, 1080)
+        except Exception:
+            ml, ma = 1920, 1080
+        esc = min(1.0, ml * 0.9 / float(l), ma * 0.85 / float(a))
+        return int(l * esc), int(a * esc)
+
+    # (07/out) EM PE OU DEITADO, SOZINHO. Os apps novos enchem a tela de
+    # tablet em qualquer forma; o que trava a orientacao (jogo) fica com a
+    # janela dele em outra forma, com tarja. Duas leituras iguais seguidas
+    # decidem: igual a tela = guarda e pronto; diferente = guarda e reabre
+    # na outra forma (uma vez so: da proxima o app ja abre certo).
+    def _conferir_orientacao(self, serial: str, pacote: str, sessao,
+                             deitado: bool, largura_dp: int = 0) -> None:
+        tela = None
+        fim = time.monotonic() + 20
+        while tela is None and sessao.rodando and not self._sair and \
+                time.monotonic() < fim:
+            achada = self._tela_da_sessao(sessao)
+            tela = achada[0] if achada else None
+            if tela is None:
+                time.sleep(0.3)
+        if tela is None:
+            self.anotar("orientacao %s: sem o numero da tela" % pacote)
+            return
+        da_tela = "deitado" if deitado else "em_pe"
+        vistas = []
+        fim = time.monotonic() + 15
+        while sessao.rodando and not self._sair and time.monotonic() < fim:
+            time.sleep(1.2)
+            try:
+                forma = self._forma_do_app(serial, tela, pacote)
+            except Exception:
+                log.exception("orientacao %s: leitura falhou", pacote)
+                return
+            if forma is None:
+                continue
+            vistas.append(forma)
+            if len(vistas) >= 2 and vistas[-1] == vistas[-2]:
+                break
+        else:
+            self.anotar("orientacao %s: sem leitura firme (%s)"
+                        % (pacote, vistas))
+            return
+        forma = vistas[-1]
+        orient = self.config.apps.setdefault("orientacao", {})
+        orient[pacote] = forma
+        # a largura em que foi vista (outra largura = conferir de novo)
+        self.config.apps.setdefault("orient_dp", {})[pacote] = largura_dp
+        self.config.gravar()
+        self.anotar("orientacao %s: o app fica %s (tela %s)"
+                    % (pacote, forma, da_tela))
+        if forma != da_tela and sessao.rodando and not self._sair:
+            self.reabrir_app(pacote, virou=True)
+
+    def _forma_do_app(self, serial: str, tela: str, pacote: str):
+        """"deitado", "em_pe" ou None: a forma da janela do app na tela
+        virtual, pelo `dumpsys window windows` (so as linhas que importam).
+        Quase quadrada = None (nao decide)."""
+        import re
+        pac = separar_app(pacote)[0]
+        texto = self._shell(
+            serial, "dumpsys window windows | grep -E "
+            "'Window #|mDisplayId|frame=|mFrame='", espera=8)
+        bloco_ok = False
+        tela_ok = False
+        for linha in texto.splitlines():
+            if "Window #" in linha:
+                bloco_ok = (" %s/" % pac) in linha
+                tela_ok = False
+                continue
+            if not bloco_ok:
+                continue
+            m = re.search(r"mDisplayId=(\d+)", linha)
+            if m:
+                tela_ok = m.group(1) == str(tela)
+                continue
+            m = re.search(r"\b(?:frame|mFrame)=\[(-?\d+),(-?\d+)\]"
+                          r"\[(-?\d+),(-?\d+)\]", linha)
+            if m and tela_ok:
+                x0, y0, x1, y1 = (int(v) for v in m.groups())
+                larg, alt = x1 - x0, y1 - y0
+                if larg <= 0 or alt <= 0 or \
+                        abs(larg - alt) < 0.1 * max(larg, alt):
+                    return None
+                return "deitado" if larg > alt else "em_pe"
+        return None
 
     def _resolucao_no_perfil(self, perfil: dict) -> None:
         """(r189) A resolucao em "p" da qualidade vira o --max-size (lado
@@ -3095,6 +4264,10 @@ class Programa:
                     if isinstance(perfil, dict) and \
                             perfil.get("predef") == "nitido":
                         perfil["predef"] = "celular"
+            # (08/out, rework) predefinicoes -> nivel e som
+            if qualidade.migrar_niveis(self.config.qualidade,
+                                       self.config.perfis, self.config.apps):
+                mudou = True
             if mudou:
                 self.config.gravar()
                 log.info("formatos/qualidade: marcas antigas convertidas "
@@ -3260,6 +4433,7 @@ class Programa:
         """Sobe um perfil. Volta na hora: o trabalho acontece numa thread."""
         if self.ativo(nome) or self.ocupado(nome):
             return
+        self.retomar_conexao()      # (07/out) ligar algo = quer o celular
         if not self.config.instalacao_ok:
             self.anotar("pedido: ligar '%s' -- RECUSADO, instalacao do scrcpy "
                         "nao encontrada" % nome)
@@ -3294,6 +4468,7 @@ class Programa:
 
     def _partida(self, nome: str) -> None:
         """Roda fora do laco: acha o celular e sobe o scrcpy."""
+        t0 = time.monotonic()      # (08/out) o tempo do pedido ao scrcpy
         try:
             alvo = self._achar_celular()
             if not alvo:
@@ -3315,6 +4490,9 @@ class Programa:
                 # O tempo de tela de ANTES, guardado para a troca sem
                 # desligar poder devolve-lo no fim (ver `_troca`).
                 sessao.tempo_original = self._ler_tempo_de_tela(alvo)
+            self._vez_de_lancar()
+            self.anotar("'%s': scrcpy chamado %d ms depois do pedido" % (
+                nome, (time.monotonic() - t0) * 1000))
             ok = sessao.iniciar(self.config.scrcpy_exe, alvo, perfil,
                                 caminhos.pasta_relatorios(),
                                 icone=desenho)
@@ -3492,6 +4670,189 @@ class Programa:
             parar.set()
             self._radio_parar = None
 
+    # (08/out, checagem no S22) A EXTENSAO poe no celular um teclado fisico
+    # simulado, e com teclado fisico o Android NAO mostra o teclado da tela:
+    # pegar o celular e tocar num campo ficava sem teclado. Enquanto o mouse
+    # esta no PC, "mostrar o teclado da tela com teclado fisico" fica ligado;
+    # no celular (digitando pelo PC), desligado. O valor dele volta ao parar.
+    def _teclado_da_tela(self, mostrar) -> None:
+        """mostrar: True/False, ou None = volta ao valor que o celular tinha.
+        Numa linha so (o ultimo pedido vale), fora da thread de quem chama."""
+        self._ime_quer = mostrar
+        if getattr(self, "_ime_rodando", False):
+            return
+        self._ime_rodando = True
+        serial = self._em_uso_pronto()
+        feito = [object()]                 # o ultimo pedido aplicado
+
+        def trabalho():
+            try:
+                while True:
+                    quer = self._ime_quer
+                    feito[0] = quer        # (sem celular conta como feito)
+                    if not serial:
+                        break
+                    if getattr(self, "_ime_original", None) is None:
+                        v = self._shell(serial, "settings get secure "
+                                        "show_ime_with_hard_keyboard",
+                                        espera=5).strip()
+                        self._ime_original = v if v in ("0", "1") else "0"
+                    valor = self._ime_original if quer is None else \
+                        ("1" if quer else "0")
+                    comando = ("settings put secure "
+                               "show_ime_with_hard_keyboard %s" % valor)
+                    # (08/out, relato dele: "demorou bastante") na VOLTA, com
+                    # o campo ja guardado: a opcao e o toque num comando so,
+                    # pela conversa aberta (sem esperar resposta) -- o
+                    # celular confere se e o mesmo campo e se o teclado esta
+                    # fechado, e toca
+                    guardado = getattr(self, "_campo_guardado", None)
+                    rapido = bool(quer and guardado and
+                                  self.borda_estado == "fora")
+                    resposta = ""
+                    if rapido:
+                        servido, (x, y) = guardado
+                        comando += ("; d=$(dumpsys input_method 2>/dev/null);"
+                                    " case \"$d\" in *\"mServedView=%s\"*) "
+                                    "case \"$d\" in *\"mInputShown=true\"*) "
+                                    "echo aberto;; *) input tap %d %d; "
+                                    "echo tocou;; esac;; *) echo outro;; esac"
+                                    % (servido.replace('"', ""), x, y))
+                        resposta = self._shell(serial, comando,
+                                               espera=5).strip()
+                        self._ime_aplicado = valor
+                    elif valor != getattr(self, "_ime_aplicado", None):
+                        if not self._pela_conversa(serial, comando):
+                            self._shell(serial, comando, espera=5)
+                        self._ime_aplicado = valor
+                    if quer is None:
+                        self._ime_original = None
+                        self._ime_aplicado = None
+                    elif resposta == "tocou":
+                        self.anotar("teclado: campo selecionado no celular -> "
+                                    "teclado reaberto (na hora)")
+                    elif quer and resposta != "aberto" and \
+                            self._ime_quer is True:
+                        self._reabrir_teclado(serial)  # outro campo: le agora
+                    if self._ime_quer is quer or self._ime_quer == quer:
+                        break
+            except Exception:
+                log.exception("teclado da tela: nao mudei")
+            finally:
+                self._ime_rodando = False
+                # (08/out) um pedido que chegou bem na saida nao se perde
+                if self._ime_quer != feito[0] and not self._sair:
+                    self._teclado_da_tela(self._ime_quer)
+        threading.Thread(target=trabalho, daemon=True,
+                         name="teclado-da-tela").start()
+
+    # (08/out, pedido dele: "tem como acelerar mais essa volta do teclado?")
+    # O leitor da tela (uiautomator) leva ~2 s. Entao o lugar do campo e lido
+    # ENQUANTO o mouse esta no celular (ao entrar, e de novo quando o campo
+    # ativo muda -- pergunta leve a cada 1,5 s) e guardado; na volta, sendo o
+    # mesmo campo, o toque e na hora.
+    def _campo_servido(self, serial: str):
+        """(campo ativo na tela do celular ou None, teclado aberto?)."""
+        import re
+        d = self._shell(serial, "dumpsys input_method 2>/dev/null | grep -E "
+                        "'^ *mServedView=|mCurTokenDisplayId=|mInputShown='",
+                        espera=6)
+        servido = re.search(r"^\s*mServedView=(\S+)", d, re.M)
+        if not servido or servido.group(1) == "null" or \
+                "mCurTokenDisplayId=0" not in d:
+            return None, False
+        return servido.group(1), "mInputShown=true" in d
+
+    def _lugar_do_campo(self, serial: str):
+        """Onde tocar no campo com foco (o FIM dele), pelo uiautomator."""
+        import re
+        xml = self._shell(serial, "uiautomator dump --compressed "
+                          "/data/local/tmp/scrcpyf-ui.xml >/dev/null 2>&1; "
+                          "grep -o '<node[^>]*focused=\"true\"[^>]*>' "
+                          "/data/local/tmp/scrcpyf-ui.xml | head -3",
+                          espera=10)
+        # (08/out, relato dele: "clicando no lugar errado no centro da tela")
+        # a CAIXA DE TEXTO primeiro; outro elemento com foco so se nao houver
+        nos = xml.splitlines()
+        nos = [n for n in nos if "EditText" in n] + \
+            [n for n in nos if "EditText" not in n]
+        for no in nos:
+            b = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', no)
+            editavel = "EditText" in no or 'focusable="true"' in no
+            if not b or not editavel:
+                continue
+            x1, y1, x2, y2 = (int(v) for v in b.groups())
+            if x2 - x1 < 4 or y2 - y1 < 4:
+                continue
+            x = max(x1 + 2, x2 - 16) if x2 - x1 > 40 else (x1 + x2) // 2
+            return x, (y1 + y2) // 2
+        return None
+
+    def _vigia_campo(self, serial: str) -> None:
+        """Com o mouse no celular: guarda o lugar do campo ativo."""
+        visto = None
+        # (08/out, relato dele: o toque caia no meio da tela) com o mouse no
+        # celular o teclado da tela SOME e a caixa DESCE; o lugar lido antes
+        # disso era o de cima. So le com o teclado fechado e a tela parada
+        # (o mesmo campo, fechado, por 0,8 s)
+        estavel_desde, ultimo = None, None
+        while not self._sair and self.borda_estado == "dentro":
+            try:
+                servido, aberto = self._campo_servido(serial)
+                agora = time.monotonic()
+                if not servido or aberto:
+                    estavel_desde, ultimo = None, None
+                    if not servido:
+                        visto = None
+                elif servido != ultimo:
+                    ultimo, estavel_desde = servido, agora
+                elif servido != visto and agora - estavel_desde >= 0.8:
+                    lugar = self._lugar_do_campo(serial)
+                    if lugar:
+                        self._campo_guardado = (servido, lugar)
+                        visto = servido
+            except Exception as erro:
+                self.anotar("teclado: vigia do campo falhou (%s)" % erro)
+                return
+            for _i in range(7):          # (08/out) a cada 0,7 s
+                if self._sair or self.borda_estado != "dentro":
+                    return
+                time.sleep(0.1)
+
+    def _garantir_vigia_campo(self) -> None:
+        # cada entrada le de novo (o lugar da vez anterior pode ter mudado)
+        self._campo_guardado = None
+        serial = self._em_uso_pronto()
+        t = getattr(self, "_campo_thread", None)
+        if not serial or (t is not None and t.is_alive()):
+            return
+        self._campo_thread = threading.Thread(
+            target=self._vigia_campo, args=(serial,), daemon=True,
+            name="teclado-campo")
+        self._campo_thread.start()
+
+    def _reabrir_teclado(self, serial: str) -> None:
+        """(08/out, pedido dele: "quando eu voltar o mouse pro pc e uma caixa
+        de texto ainda tiver selecionada o teclado deve voltar a aparecer")
+        Ligar a opcao nao reabre o teclado de um campo ja selecionado, e o
+        Android nao tem comando para "mostrar o teclado". Entao: so se ha um
+        campo ATIVO na tela do celular (mServedView, tela 0; pergunta leve),
+        o programa toca no FIM dele -- o teclado abre e o cursor vai ao fim.
+        O lugar vem do guardado (mesmo campo) ou, senao, do leitor da tela."""
+        servido, aberto = self._campo_servido(serial)
+        if not servido or aberto:
+            return
+        guardado = getattr(self, "_campo_guardado", None)
+        if guardado and guardado[0] == servido:
+            lugar, como = guardado[1], "na hora"
+        else:
+            lugar, como = self._lugar_do_campo(serial), "lido agora"
+        if not lugar or self.borda_estado != "fora":
+            return                       # sem lugar, ou o mouse ja voltou
+        self._shell(serial, "input tap %d %d" % lugar, espera=5)
+        self.anotar("teclado: campo selecionado no celular -> teclado "
+                    "reaberto (%s)" % como)
+
     def _parar_borda(self) -> None:
         # O radio NAO desliga aqui: outro modo pode estar no ar. Quem cuida e
         # o `_conferir_radio` (a conversa fechada abaixo reabre sozinha).
@@ -3499,6 +4860,7 @@ class Programa:
         if self.borda is not None:
             self.borda.parar()
             self.borda = None
+            self._teclado_da_tela(None)      # (08/out) o valor dele de volta
         with self._trava_do_shell:
             self._fechar_shell()
         self.borda_estado = "fora"
@@ -3587,18 +4949,19 @@ class Programa:
         # QUALIDADE UNICA (23/set/2026): a de OPCOES > qualidade vale para
         # todos os modos, por cima do que o perfil tiver.
         # (r196) ...do CONJUNTO DA CONEXAO que a sessao vai usar.
+        # (08/out, rework) O NIVEL (imagem) e o SOM: os do modo, senao os
+        # gerais -- iguais no cabo e no sem fio.
         q = self.config.qualidade
-        con = self.conexao_de(serial)
-        base = qualidade.conjunto(q, con)
-        qualidade.aplicar_no_perfil(perfil, base.get("video"),
-                                    base.get("audio"))
-        # O modo pode usar outra predefinicao (espelhar e extensao tem a
-        # fileira "qualidade"; vazio = a de opcoes) -- uma por conexao.
-        propria = perfil.get(qualidade.CHAVES_PREDEF[con])
-        if propria:
-            video_p, audio_p = qualidade.valores_da_predef(q, propria)
-            qualidade.aplicar_no_perfil(perfil, video_p, audio_p)
+        qualidade.aplicar_no_perfil(
+            perfil, qualidade.video_do_nivel(qualidade.nivel_de(perfil, q)),
+            qualidade.audio_do_som(qualidade.som_de(perfil, q)))
         self._resolucao_no_perfil(perfil)                   # (r189)
+        # (02/out, relato do amigo: Redmi Note 8 Pro) Android 10 ou mais
+        # velho nao manda som; na extensao (sem imagem) o scrcpy ficava sem
+        # nada para receber e caia na hora ("Demuxer error").
+        sdk = (self.celular or {}).get("sdk")
+        if nome == "extensao" and isinstance(sdk, int) and sdk < 30:
+            perfil.setdefault("audio", {})["ligado"] = False
         if nome != "jogo":
             return perfil
         conteudo = conteudo_do(perfil)
@@ -3740,6 +5103,13 @@ class Programa:
         prontos = {s for s, e in vistos.items() if e == "device"}
         antes = getattr(self, "_prontos", None)
         self._prontos = prontos
+        self._ultimos_vistos = dict(vistos)
+        if self.conexao_pausada:
+            # (07/out) "desconectar tudo": ninguem entra sozinho (nem o
+            # cabo ligado) ate ele pedir de novo
+            if prontos != antes:
+                self._avisar_mudanca()
+            return
         self._outro_celular &= prontos     # saiu e voltou: vale olhar de novo
         atual = (self.celular or {}).get("serial", "")
         if atual and atual not in prontos:
@@ -3749,7 +5119,27 @@ class Programa:
             self._lendo_celular = False
             self._avisar_mudanca()
             atual = ""
-        if not atual and prontos and prontos != antes:
+        if celular.PREFERENCIA == "sem_fio" and prontos != antes:
+            # Cabo que apareceu, OU sem fio que caiu com o cabo ja ligado
+            # (03/out, teste no S22: a porta fechou -- `adb usb`, religar a
+            # depuracao -- e o cabo nem saiu da lista; ninguem reabria).
+            ja = antes or set()
+            caiu_sem_fio = any(not celular.e_cabo(s) for s in ja - prontos)
+            for s in sorted(prontos):
+                if celular.e_cabo(s) and (s not in ja or caiu_sem_fio):
+                    self._abrir_sem_fio(s)
+                    break
+        # (07/out, relato dele) Abrindo o sem fio pelo cabo, o cabo NAO entra
+        # em uso antes: tudo o que subisse por ele (leitura, notificacoes,
+        # icones) morria no `tcpip` e o celular parecia sumir. Quando o sem
+        # fio fica pronto ele entra direto; se nao ficar, o cabo entra
+        # (`_sem_fio_terminou`).
+        if not any(celular.e_cabo(s) for s in prontos) and \
+                self.estado_sem_fio()[0] in ("pronto", "falhou"):
+            self._sem_fio_estado = None      # tirou o cabo: o recado sai
+        so_cabo = prontos and all(celular.e_cabo(s) for s in prontos)
+        esperar = so_cabo and getattr(self, "_abrindo_sem_fio", False)
+        if not atual and prontos and prontos != antes and not esperar:
             escolhido = celular.escolher_serial(
                 "\n".join("%s\tdevice" % s for s in sorted(prontos)))
             if escolhido:
@@ -3811,6 +5201,199 @@ class Programa:
             self.anotar("conexao: trocando %s -> %s" % (atual, escolhido))
             self._lendo_celular = False
             self._ler_o_celular(escolhido)
+
+    # -- (07/out, pedido dele) DESCONECTAR TUDO: segurar 2 s o botao da
+    # conexao na barra. Para tudo, solta as conexoes sem fio e o programa
+    # fica desconectado (nem o cabo ligado entra sozinho) ate ele clicar no
+    # botao de novo ou usar o PAREAR.
+
+    conexao_pausada = False
+
+    def desconectar_tudo(self, desparear: bool = False) -> None:
+        """(08/out, pedido dele: o "desparear" do PAREAR com duas opcoes)
+        `desparear` = alem de desconectar, o celular SAI do sem fio (`adb usb`:
+        a porta 5555 fecha nele) e o programa esquece o endereco: so volta
+        pareando de novo (cabo ou codigo). Sem ele, fica pareado: o clique na
+        conexao ou o PAREAR liga de novo."""
+        self.anotar("pedido: %s" % ("desparear (desconecta e esquece)"
+                                    if desparear else
+                                    "desconectar tudo (fica desconectado)"))
+        serial = (self.celular or {}).get("serial", "")
+        self.conexao_pausada = True
+        for nome in list(self.sessoes) + list(self.ligando):
+            try:
+                self.desligar(nome)
+            except Exception:
+                log.exception("desconectar tudo: %s", nome)
+        self._abrindo_sem_fio = False
+        self._sem_fio_estado = None
+        if self.celular:
+            self.anotar("celular DESCONECTADO (%s, a pedido)"
+                        % self.celular.get("serial", ""))
+        self.celular = {}
+        self._cel_preparado = None
+        self._lendo_celular = False
+        adb = self.config.adb_exe
+        if desparear and self.config.ip_reserva:
+            self.anotar("desparear: esquecido o endereco %s"
+                        % self.config.ip_reserva)
+            self.config.ip_reserva = ""
+            self.config.gravar()
+
+        def soltar():
+            if desparear and serial:
+                saida = celular._rodar([adb, "-s", serial, "usb"], espera=8)
+                self.anotar("desparear: sem fio desligado no celular (%s)"
+                            % (saida or "").strip()[:80])
+            celular._rodar([adb, "disconnect"], espera=8)
+        threading.Thread(target=soltar, daemon=True,
+                         name="desconectar").start()
+        self._conferir_o_celular()       # notificacoes e bateria param ja
+        self._avisar_mudanca()
+
+    def retomar_conexao(self) -> None:
+        """Volta a conectar sozinho (o clique no botao, ou o PAREAR)."""
+        if not self.conexao_pausada:
+            return
+        self.anotar("pedido: voltar a conectar")
+        self.conexao_pausada = False
+        vistos = getattr(self, "_ultimos_vistos", None) or {}
+        self._prontos = set()            # tudo "aparece" de novo
+        self._sem_fio_tentado = {}
+        self._dispositivos(vistos)
+        if not self.celular and self.config.ip_reserva:
+            # o sem fio foi solto no desconectar: liga de novo no ultimo
+            adb, ip = self.config.adb_exe, self.config.ip_reserva
+            threading.Thread(target=lambda: celular._rodar(
+                [adb, "connect", "%s:5555" % ip], espera=8),
+                daemon=True, name="reconectar").start()
+        self._avisar_mudanca()
+
+    SEM_FIO_TENTATIVAS = 3       # (07/out) sozinho: ate 3 vezes, 6 s entre
+
+    def _abrir_sem_fio(self, serial: str, a_pedido: bool = False) -> None:
+        """
+        (03/out, pedido dele depois do teste do amigo: so plugar o cabo nao
+        abria o sem fio, e o botao do PAREAR nao e obvio) Preferindo o sem
+        fio, o cabo que aparece abre a conexao sem fio sozinho, numa thread.
+        O `tcpip` derruba o cabo por um instante e ele "aparece" de novo:
+        o mesmo cabo so comeca de novo depois de um minuto.
+
+        (07/out, relato dele: "plugo, tiro, plugo de novo e clico") Uma
+        tentativa so, curta e calada, falhava e ficava assim: agora sao ate
+        SEM_FIO_TENTATIVAS, cada uma esperando o celular responder, e o fim
+        aparece na tela ("pode tirar o cabo" ou o motivo). `a_pedido` = o
+        botao do PAREAR: comeca na hora, mesmo com algo aberto pelo cabo.
+        """
+        agora = time.monotonic()
+        tentados = getattr(self, "_sem_fio_tentado", None)
+        if tentados is None:
+            tentados = self._sem_fio_tentado = {}
+        if getattr(self, "_abrindo_sem_fio", False):
+            return
+        if not a_pedido and agora - tentados.get(serial, -999.0) < 60:
+            return
+        tentados[serial] = agora
+        self._abrindo_sem_fio = True
+        adb = self.config.adb_exe
+        sem_fio = [s for s in (getattr(self, "_prontos", None) or set())
+                   if not celular.e_cabo(s)]
+        if not sem_fio or a_pedido:      # (cabo de carregar: sem recado)
+            self._sem_fio_estado = ("abrindo", "abrindo a conexão sem fio "
+                                    "pelo cabo…")
+            self._avisar_mudanca()
+        pode_reiniciar = a_pedido or not (self.sessoes or self.ligando)
+
+        def trabalho():
+            from . import conexao
+            ip, como, alvo = "", "", ""
+            try:
+                # Este celular ja tem sem fio de pe? (mesmo ro.serialno)
+                _m, id_cabo = conexao._identidade(adb, serial)
+                for s in sem_fio:
+                    if id_cabo and conexao._identidade(adb, s)[1] == id_cabo \
+                            and conexao._responde(adb, s):
+                        ip, como, alvo = s, "ja estava de pe", s
+                        break
+                vez = 0
+                while not ip and vez < self.SEM_FIO_TENTATIVAS and \
+                        not self._sair:
+                    vez += 1
+                    ip, como = conexao.abrir_sem_fio(adb, serial,
+                                                     pode_reiniciar)
+                    self.anotar("cabo abre o sem fio (%d/%d): %s (%s)" % (
+                        vez, self.SEM_FIO_TENTATIVAS,
+                        "OK " + ip if ip else "nao", como))
+                    if ip or como in ("celular sem Wi-Fi",) or \
+                            "tcpip ficou para depois" in como:
+                        break
+                    time.sleep(6)
+                if ip and not alvo:
+                    alvo = "%s:%d" % (ip, conexao.PORTA_SEM_FIO)
+                    self.config.lembrar_ip(ip)
+            except Exception as erro:
+                como = str(erro)
+                self.anotar("cabo abre o sem fio: falhou (%s)" % erro)
+            finally:
+                self.pedidos.put(("sem_fio_fim", serial, alvo, como))
+
+        threading.Thread(target=trabalho, daemon=True,
+                         name="abrir-sem-fio").start()
+
+    def abrir_sem_fio_agora(self) -> bool:
+        """(07/out) O botao "abrir sem fio" do PAREAR: o cabo ligado agora
+        abre o sem fio na hora (sem esperar o minuto). False = sem cabo."""
+        cabos = sorted(s for s in (getattr(self, "_prontos", None) or set())
+                       if celular.e_cabo(s))
+        if not cabos:
+            return False
+        self.anotar("pedido: abrir o sem fio pelo cabo (%s)" % cabos[0])
+        self._abrir_sem_fio(cabos[0], a_pedido=True)
+        return True
+
+    def estado_sem_fio(self) -> tuple[str, str]:
+        """("abrindo"|"pronto"|"falhou"|"", texto) -- para a tela."""
+        return getattr(self, "_sem_fio_estado", None) or ("", "")
+
+    def _sem_fio_terminou(self, serial: str, alvo: str, como: str) -> None:
+        """Na thread do programa: o fim da abertura do sem fio. `alvo` = o
+        serial sem fio que respondeu (vazio = nao abriu)."""
+        self._abrindo_sem_fio = False
+        if alvo and como == "ja estava de pe":
+            # cabo so para carregar, com o sem fio ja em uso: nada a dizer
+            self._sem_fio_estado = None
+            self._avisar_mudanca()
+            return
+        if alvo:
+            self._sem_fio_estado = ("pronto", "sem fio pronto: pode tirar o "
+                                    "cabo.")
+            # entra direto pelo sem fio: o vigia pode ainda nao te-lo visto
+            # (e a leitura de quem nao esta na lista e descartada)
+            self._prontos = set(getattr(self, "_prontos", None) or ()) | {alvo}
+            atual = (self.celular or {}).get("serial", "")
+            if not atual or celular.e_cabo(atual):
+                self._lendo_celular = False
+                self.anotar("conexao: sem fio pronto, entrando por %s" % alvo)
+                self._ler_o_celular(alvo)
+            if self.bandeja is not None and self.config.opcao("notificacoes"):
+                self.bandeja.notificar("Sem fio pronto",
+                                       "Pode tirar o cabo: o celular segue "
+                                       "conectado pelo Wi-Fi.")
+        else:
+            motivo = {"celular sem Wi-Fi": "o celular não está no wi-fi"}.get(
+                como, "não respondeu (o celular está na mesma rede do pc?)"
+                if "nao respondeu" in como else como or "falhou")
+            if "tcpip ficou para depois" in como:
+                motivo = "algo está aberto pelo cabo; feche e tente de novo"
+            self._sem_fio_estado = ("falhou", "o sem fio não abriu: %s."
+                                    % motivo)
+            # o cabo entra em uso (estava esperando o sem fio)
+            atual = (self.celular or {}).get("serial", "")
+            prontos = getattr(self, "_prontos", None) or set()
+            if not atual and serial in prontos:
+                self.anotar("celular CONECTADO (%s, pelo cabo)" % serial)
+                self._ler_o_celular(serial)
+        self._avisar_mudanca()
 
     def _ler_o_celular(self, serial: str) -> None:
         """
@@ -3896,9 +5479,16 @@ class Programa:
         guarda nem sempre e o que o adb usa) e le tudo dele. (r193) Com
         `serial` (o "usar" da lista), e ESSE celular, mesmo com outro em
         uso."""
+        self.retomar_conexao()           # (07/out) pediu: volta a conectar
         if serial:
             self._escolha_manual = serial
             self._outro_celular.discard(serial)
+            # (07/out) o sem fio que o cabo acabou de abrir (e que respondeu)
+            # pode ainda nao ter sido visto pelo vigia: sem isto a leitura
+            # dele era descartada
+            if not celular.e_cabo(serial):
+                self._prontos = set(getattr(self, "_prontos", None) or ()) \
+                    | {serial}
 
         def achar():
             alvo = serial or celular.achar(self.config.adb_exe,
@@ -3935,14 +5525,19 @@ class Programa:
     # no celular"). Um laco leve NO CELULAR le a bateria a cada 2 s e so
     # escreve quando o numero ou o carregando muda; o PC so recebe (e so
     # repinta) nessas horas. Vale embaixo do PAREAR e na tela status.
+    # (07/out, pedido dele) + a TEMPERATURA da bateria, relida a cada 45
+    # voltas (90 s): muda devagar e cada leitura nova repintaria o rodape.
     BATERIA_LACO = (
-        "m=scrcpyf_bateria; B=/sys/class/power_supply/battery; u=; "
-        "while :; do if [ -r $B/capacity ]; then c=$(cat $B/capacity); "
+        "m=scrcpyf_bateria; B=/sys/class/power_supply/battery; u=; i=0; "
+        "t=; while :; do if [ -r $B/capacity ]; then c=$(cat $B/capacity); "
         "s=$(cat $B/status); else d=$(dumpsys battery); "
         "c=$(echo \"$d\" | grep -m1 ' level:' | tr -dc 0-9); "
         "s=$(echo \"$d\" | grep -m1 ' status:' | tr -dc 0-9); fi; "
-        "if [ \"$c $s\" != \"$u\" ]; then echo \"@b $c $s\"; u=\"$c $s\"; fi; "
-        "sleep 2; done")
+        "if [ $((i%45)) -eq 0 ]; then if [ -r $B/temp ]; then "
+        "t=$(cat $B/temp); else t=$(dumpsys battery | grep -m1 "
+        "' temperature:' | tr -dc 0-9); fi; fi; i=$((i+1)); "
+        "if [ \"$c $t $s\" != \"$u\" ]; then echo \"@b $c $t $s\"; "
+        "u=\"$c $t $s\"; fi; sleep 2; done")
     BATERIA_MATAR = "pkill -f 'scrcpyf_bateri[a]' ; true"
 
     def _vigiar_bateria(self, serial: str) -> None:
@@ -3990,10 +5585,19 @@ class Programa:
                 if len(partes) < 2 or partes[0] != "@b" or \
                         not partes[1].isdigit():
                     continue
-                estado = partes[2] if len(partes) > 2 else ""
+                # "@b nivel [temperatura] estado" (o estado do sysfs pode ter
+                # espaco: "Not charging"; a temperatura falta se nao leu)
+                resto = partes[2:]
+                temp = None
+                if resto and resto[0].lstrip("-").isdigit() and \
+                        len(resto[0]) >= 3:
+                    temp = int(resto.pop(0)) / 10.0              # (07/out)
+                estado = " ".join(resto)
                 info = {"serial": serial, "bateria": int(partes[1]),
                         "carregando": estado in ("Charging", "Full", "2",
                                                  "5")}
+                if temp is not None:
+                    info["temperatura"] = temp
                 if (self.celular or {}).get("serial") == serial:
                     self.pedidos.put(("celular", info))
                 if getattr(self, "_status_procs", None):
@@ -4279,6 +5883,8 @@ class Programa:
             # --require-audio SO na sobreposicao: se o celular nao der o som
             # para dois ao mesmo tempo, o novo cai na hora (em vez de subir
             # mudo e o velho ser derrubado) e o plano B entra.
+            if sobrepor:
+                self._vez_de_lancar()
             ok = sobrepor and nova.iniciar(
                 self.config.scrcpy_exe, serial, perfil,
                 caminhos.pasta_relatorios(), icone=desenho,
@@ -4341,6 +5947,7 @@ class Programa:
                     time.sleep(0.3)     # a limpeza do velho devolver o tempo
                 nova = Sessao(nome)
                 nova.tempo_original = velha.tempo_original
+                self._vez_de_lancar()
                 if not nova.iniciar(self.config.scrcpy_exe, serial, perfil,
                                     caminhos.pasta_relatorios(), icone=desenho,
                                     extras=extras, nome_log=nome_log):
@@ -4708,6 +6315,10 @@ class Programa:
         if not adb or not adb.exists():
             return
         try:
+            self._desligar_wifi_rapido()     # (09/out) antes do adb sair
+        except Exception:
+            pass
+        try:
             subprocess.run([str(adb), "kill-server"], capture_output=True,
                            timeout=5, cwd=str(adb.parent),
                            creationflags=getattr(subprocess,
@@ -4738,6 +6349,7 @@ class Programa:
         self._protegido("trocas", self._conferir_trocas)
         self._protegido("celular", self._conferir_o_celular)
         self._protegido("radio", self._conferir_radio)
+        self._protegido("wifi rapido", self._conferir_wifi_rapido)
 
         # Uma sessao pode ter morrido sozinha -- o celular negou a captura de
         # audio, o Wi-Fi caiu, ou a janela do espelhamento foi fechada no X.
@@ -4758,11 +6370,89 @@ class Programa:
                         % (nome, sessao.codigo_saida if sessao else "?",
                            " / ".join(sessao.ultimas_linhas_do_log(3).splitlines())
                            if sessao else ""))
+            self._codec_recusado(sessao)
             if nome.startswith(APP) and sessao is not None:
                 self._app_fechou(nome, sessao)     # fechou a janela no X
             self.avisar_na_tela(nome, "caiu")
         if caiu:
             self._avisar_mudanca()
+
+    def _codec_recusado(self, sessao) -> None:
+        """(09/out) O celular nao aceitou as opcoes de tempo real do
+        codificador (`sessao.OPCOES_CODEC`): elas saem para as proximas
+        partidas desta execucao e fica anotado."""
+        from . import sessao as _sessao
+        if not _sessao.OPCOES_CODEC or sessao is None:
+            return
+        try:
+            fim = sessao.ultimas_linhas_do_log(12)
+        except Exception:
+            return
+        baixo = fim.lower()
+        if "error" in baixo and ("codec" in baixo or "encoder" in baixo or
+                                 "configure" in baixo):
+            _sessao.OPCOES_CODEC = ""
+            self.anotar("codificador recusou as opcoes de tempo real: "
+                        "desligadas (fim do log: %s)" % " / ".join(
+                            fim.splitlines()[-3:]))
+
+    # (09/out, pedido dele: menos atraso no sem fio sem mexer nas
+    # predefinicoes) WI-FI DO CELULAR EM BAIXA LATENCIA (o modo dos jogos:
+    # sem economia de energia no radio) enquanto houver sessao SEM FIO; volta
+    # ao normal quando a ultima sai, ao trocar para o cabo e ao fechar.
+    # Celular que nao deixar (`cmd wifi` pede permissao que o shell nao tem
+    # em alguns): fica anotado e nao tenta de novo nesta execucao.
+
+    def _conferir_wifi_rapido(self) -> None:
+        sem_fio = [s.serial for n, s in self.sessoes.items()
+                   if s.rodando and s.serial and not celular.e_cabo(s.serial)]
+        quer = sem_fio[0] if sem_fio else ""
+        tem = getattr(self, "_wifi_rapido_em", "")
+        # desligar so depois de 5 s sem sessao sem fio: numa troca (uma cai,
+        # a outra sobe) nao fica liga-desliga
+        agora = time.monotonic()
+        if quer:
+            self._wifi_rapido_visto = agora
+        elif tem and agora - getattr(self, "_wifi_rapido_visto", 0) < 5:
+            return
+        if quer == tem or getattr(self, "_wifi_rapido_ocupado", False) or \
+                getattr(self, "_wifi_rapido_recusado", False):
+            return
+        self._wifi_rapido_ocupado = True
+
+        def trabalho():
+            try:
+                if tem:
+                    self._wifi_rapido(tem, False)
+                ok = self._wifi_rapido(quer, True) if quer else True
+                self._wifi_rapido_em = quer if ok else ""
+                if quer and not ok:
+                    self._wifi_rapido_recusado = True
+            finally:
+                self._wifi_rapido_ocupado = False
+        threading.Thread(target=trabalho, daemon=True,
+                         name="wifi-rapido").start()
+
+    def _wifi_rapido(self, serial: str, ligar: bool) -> bool:
+        """`cmd wifi force-low-latency-mode enabled|disabled`. True = o
+        celular aceitou."""
+        saida = self._shell(serial, "cmd wifi force-low-latency-mode %s" % (
+            "enabled" if ligar else "disabled"), espera=5)
+        baixo = saida.lower()
+        ok = not any(p in baixo for p in ("exception", "permission",
+                                          "unknown", "error", "not ",
+                                          "usage"))
+        self.anotar("wifi do celular em baixa latencia: %s -> %s%s" % (
+            "ligar" if ligar else "desligar", "ok" if ok else "RECUSOU",
+            "" if ok else " (%s)" % saida.strip()[:120]))
+        return ok
+
+    def _desligar_wifi_rapido(self) -> None:
+        """Ao fechar: devolve o Wi-Fi do celular ao normal (na hora)."""
+        tem = getattr(self, "_wifi_rapido_em", "")
+        if tem:
+            self._wifi_rapido_em = ""
+            self._wifi_rapido(tem, False)
 
     def _atender(self, pedido) -> None:
         acao = pedido[0] if isinstance(pedido, tuple) else pedido
@@ -4783,6 +6473,16 @@ class Programa:
             self.alternar_conteudo("som")
         elif acao == "trocar_janelas":
             self.trocar_janelas()
+        elif acao == "mini_player":
+            if getattr(self, "ao_mini_player", None) is not None:
+                self.ao_mini_player()
+        elif acao == "sem_fio_fim":
+            self._sem_fio_terminou(pedido[1], pedido[2], pedido[3])
+        elif acao == "menu_bandeja":
+            # (07/out) botao direito no icone: o menu da casa, desenhado
+            # pela janela (sem ela, o da bandeja nao chega aqui)
+            if getattr(self, "ao_menu_bandeja", None) is not None:
+                self.ao_menu_bandeja(pedido[1], pedido[2])
         elif acao == "app":
             self.abrir_ou_trazer(pedido[1],
                                  pedido[2] if len(pedido) > 2 else "")
@@ -4914,8 +6614,14 @@ class Programa:
     def _evento_da_borda(self, evento: str, detalhe: str) -> None:
         if self.borda is None:
             return                      # evento atrasado de um vigia ja parado
+        if evento == "pronta":
+            self._teclado_da_tela(True)  # (08/out) comeca com o mouse no PC
         if evento in ("entrou", "voltou"):
             self.borda_estado = "dentro" if evento == "entrou" else "fora"
+            # (08/out) mouse no PC = o celular mostra o teclado da tela
+            self._teclado_da_tela(evento == "voltou")
+            if evento == "entrou":
+                self._garantir_vigia_campo()   # o lugar do campo, ja lido
             self.anotar("borda: %s%s" % (evento, (" (%s)" % detalhe)
                                           if detalhe else ""))
             self._avisar_mudanca()
