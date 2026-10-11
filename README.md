@@ -123,6 +123,15 @@ Windows.
 Uma versão nova publicada em Releases precisa da tag `v<versão>` e do arquivo
 `scrcpy-f-<versão>.zip` — é o que o atualizador procura.
 
+## Como foi feito
+
+O scrcpy-f foi desenvolvido com apoio de inteligência artificial: o código foi
+escrito em conversa com o **Claude**, da Anthropic (no Claude Code). As decisões
+de projeto, o desenho da interface, os testes com celulares e PCs de verdade e o
+rumo de cada funcionalidade são de [finjackin](https://github.com/finjackin1).
+O espelhamento em si é do [scrcpy](https://github.com/Genymobile/scrcpy), da
+Genymobile.
+
 ## Licença
 
 GPLv3 — veja `LICENSE`. O scrcpy é da Genymobile (Apache 2.0) e não vem
