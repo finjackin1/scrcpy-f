@@ -1,54 +1,69 @@
-android\ -- o programinha que roda NO CELULAR para devolver os icones dos apps
-===========================================================================
+android\: os programinhas que rodam NO CELULAR
+=============================================
 
-Icones.smali          o codigo-fonte (Dalvik, escrito a mao em smali)
-scrcpyf-icones.jar    o mesmo codigo montado (classes.dex dentro de um zip)
+O scrcpy-f manda cada .jar para /data/local/tmp do celular pelo adb e roda
+com app_process, igual o scrcpy faz com o servidor dele.
 
-Como o scrcpy-f usa: manda o .jar para /data/local/tmp do celular pelo adb e
-roda  CLASSPATH=/data/local/tmp/scrcpyf-icones.jar app_process / scrcpyf.Icones
-<tamanho> <pacote> <pacote> ...  -- igual o scrcpy faz com o servidor dele.
-Cada linha da saida e "pacote<TAB>png-em-base64" (ou "pacote<TAB>-").
 
-Como remontar o .jar depois de mexer no .smali (fora do Windows, com Java):
-o assembler de smali vem dentro do apktool.jar. Uma classe de 5 linhas chama
+Icones.smali / scrcpyf-icones.jar: devolve os ícones dos apps
+-------------------------------------------------------------
+Icones.smali          o código-fonte (Dalvik, escrito à mão em smali)
+scrcpyf-icones.jar    o mesmo código montado (classes.dex dentro de um zip)
+
+Uso: CLASSPATH=/data/local/tmp/scrcpyf-icones.jar app_process / scrcpyf.Icones
+<tamanho> <pacote> <pacote> ...
+Cada linha da saída é "pacote<TAB>png-em-base64" (ou "pacote<TAB>-").
+
+Remontar o .jar depois de mexer no .smali (com Java): o assembler de smali
+vem dentro do apktool.jar. Uma classe de 5 linhas chama
 brut.androlib.src.SmaliBuilder.build(pasta_smali, classes.dex, 26); depois
-basta zipar o classes.dex como scrcpyf-icones.jar. Detalhe no
-docs\CONTEXTO.md (r74).
+é só zipar o classes.dex como scrcpyf-icones.jar.
 
-Tela.java / scrcpyf-tela.jar (r154, Java desde o r156): liga e desliga o
-PAINEL da tela, o mesmo que o scrcpy faz no --turn-screen-off. O vigia do
-sono deixa ele de pe (CLASSPATH=/data/local/tmp/scrcpyf-tela.jar
-app_process / scrcpyf.Tela vigia): ele mesmo le o botao no logcat, acorda o
-celular e alterna o painel, e escreve "botao <acesa|apagada> ..." com os
-tempos. Aceita "on"/"off" na entrada ("ok <modo> <telas>" ou "erro ...").
-Sem "vigia" so obedece on/off; com "on"/"off" como argumento faz uma vez.
-Notif.java / scrcpyf-notif.jar (01/out/2026): REMOVE notificacoes do
-celular (o mesmo que arrastar na barra: IStatusBarService.onNotificationClear)
--- app_process / scrcpyf.Notif remover <chave> [<chave> ...]; a chave e a do
-"cmd notification list". Ler as notificacoes o PC faz pelo "cmd notification"
-(a API de listar pede uma permissao que o shell nao tem). Monta igual ao
-Tela.java (abaixo); o JDK portatil e o dex-tools baixados para a pasta
-temporaria da sessao bastam. O MESMO jar leva o Midia.java (player: le e
-controla as sessoes de midia; desde 02/out/2026 manda tambem a capa do
-album, "A <pacote> <chave> <jpeg base64>"). Montar os dois juntos:
-javac --release 8 -d cls Notif.java Midia.java.
 
-Ouvinte.java (03/out/2026): vai no MESMO scrcpyf-notif.jar. O shell se
-registra como OUVINTE de notificacoes (como a barra do Android) e manda as
-acoes e imagens de cada uma; obedece "apertar a acao" (com o texto da
-resposta) e "tocar no corpo" (abrir o item exato). Ele usa classes do
-Android direto: as CASCAS em stubs\ existem so para compilar (nao vao no
-jar). Montar os tres juntos:
+Tela.java / scrcpyf-tela.jar: liga e desliga a tela
+---------------------------------------------------
+Liga e desliga o PAINEL da tela, o mesmo que o scrcpy faz no
+--turn-screen-off. O vigia do sono deixa ele de pé
+(CLASSPATH=/data/local/tmp/scrcpyf-tela.jar app_process / scrcpyf.Tela vigia):
+ele mesmo lê o botão no logcat, acorda o celular e alterna o painel, e
+escreve "botao <acesa|apagada> ..." com os tempos. Aceita "on"/"off" na
+entrada ("ok <modo> <telas>" ou "erro ..."). Sem "vigia", só obedece
+on/off; com "on"/"off" como argumento, faz uma vez.
+
+
+scrcpyf-notif.jar: notificações, player e área de transferência
+---------------------------------------------------------------
+Um jar só, com quatro classes:
+
+Notif.java   REMOVE notificações do celular (o mesmo que arrastar na barra:
+             IStatusBarService.onNotificationClear).
+             app_process / scrcpyf.Notif remover <chave> [<chave> ...]
+             A chave é a do "cmd notification list". Ler as notificações o
+             PC faz pelo "cmd notification" (a API de listar pede uma
+             permissão que o shell não tem).
+Midia.java   o player: lê e controla as sessões de mídia e manda também a
+             capa do álbum ("A <pacote> <chave> <jpeg base64>").
+Ouvinte.java o shell se registra como OUVINTE de notificações (como a barra
+             do Android) e manda as ações e imagens de cada uma; obedece
+             "apertar a ação" (com o texto da resposta) e "tocar no corpo"
+             (abrir o item exato). Usa classes do Android direto: as CASCAS
+             em stubs\ existem só para compilar (não vão no jar).
+Area.java    põe um texto na área de transferência do celular (o que acabou
+             de ser copiado no PC).
+             app_process / scrcpyf.Area <texto em base64 UTF-8> -> "ok".
+             Só reflexão (sem cascas).
+
+
+Como montar Tela.java e scrcpyf-notif.jar
+-----------------------------------------
+Basta um JDK portátil e o dex-tools 2.4 do dex2jar (no GitHub), que traz o
+dx-30.0.2.jar.
+
+Tela:
+  javac --release 8 -d cls Tela.java
+Notif (as quatro classes juntas):
   javac --release 8 -d stubcls (todos os .java de stubs\)
-  javac --release 8 -cp stubcls -d cls Notif.java Midia.java Ouvinte.java
-  e o dx como abaixo.
-
-Como remontar: javac --release 8 -d cls Tela.java (pasta scrcpyf/) e
-java -jar dx-30.0.2.jar --dex --min-sdk-version=26 --output=classes.dex cls
-(o dx vem no dex-tools 2.4 do dex2jar, no GitHub); zipar o classes.dex.
-
-Area.java (08/out/2026): vai no MESMO scrcpyf-notif.jar. Poe um texto na area
-de transferencia do celular (o do PC, copiado agora): app_process /
-scrcpyf.Area <texto em base64 UTF-8> -> "ok". So reflexao (sem cascas).
-Montar os quatro juntos:
   javac --release 8 -cp stubcls -d cls Notif.java Midia.java Ouvinte.java Area.java
+Depois, nos dois casos:
+  java -jar dx-30.0.2.jar --dex --min-sdk-version=26 --output=classes.dex cls
+e zipar o classes.dex com o nome do jar.

@@ -2,7 +2,7 @@
 
 Programa de bandeja para Windows que usa o
 [scrcpy](https://github.com/Genymobile/scrcpy) para usar o celular Android
-junto do PC — espelhar, ouvir, estender a tela e abrir cada app do celular
+junto do PC: espelhar, ouvir, estender a tela e abrir cada app do celular
 numa janela própria do Windows.
 
 ## Baixar e começar
@@ -17,7 +17,7 @@ numa janela própria do Windows.
 3. No celular, ligue a **Depuração sem fio** (Opções do desenvolvedor), deixe
    na mesma rede Wi-Fi do PC (ou a **Depuração USB**, com o cabo). Ele
    aparece em **Parear › conexão**: já pareado, entra sozinho; novo, aparece
-   com **conectar** — pelo cabo basta aceitar o aviso no celular; sem fio, o
+   com **conectar**. Pelo cabo, basta aceitar o aviso no celular. Sem fio, o
    programa abre a tela do código e preenche o endereço sozinho quando você
    abre "parear com código" no celular.
 
@@ -26,8 +26,8 @@ janela; botão direito para o menu.
 
 **Requisitos:** Windows 10 (1803 ou mais novo) ou 11, 64 bits. Android 5 ou
 mais novo para espelhar; o **som no PC pede Android 11**, e os **apps em
-janela própria, Android 10**. O programa confere o que cada celular aceita e avisa quando um
-recurso não existe na versão dele, em vez de quebrar.
+janela própria, Android 10**. O programa confere o que cada celular aceita e
+avisa quando um recurso não existe na versão dele, em vez de quebrar.
 
 ## O que ele faz
 
@@ -37,8 +37,8 @@ recurso não existe na versão dele, em vez de quebrar.
 | **Extensão** | o celular vira uma tela a mais do PC: o mouse e o teclado passam para ele pela borda (veja abaixo) |
 | **Apps** | cada app do celular numa janela própria do Windows, com o ícone e o nome do app e um botão separado na barra de tarefas. O celular continua livre na sua mão |
 | **Status** | bateria, temperatura, memória e o que mais pesa no celular |
-| **Notificações** | as notificações do celular no PC, como no celular: **×** remove lá também, e o que você tira no celular some aqui. Um aviso no canto da tela quando chega uma (clique abre o app numa janela do PC; respeita o "não perturbe" do Windows). **histórico** das últimas 24 horas. Em **ajustes**, uma chave geral (todos os apps) e uma por app; o botão direito num app, em Apps, também liga ou desliga. Mostra quais apps estão com as notificações desligadas no próprio celular. Nada disso muda o celular. **No Windows:** as notificações também ficam na Central de Notificações (clique abre no scrcpy-f) e a música que toca no celular aparece nos controles de mídia do Windows, com as teclas de música do teclado. O **player** fica no topo da aba, com barra de progresso e botões; botão direito numa notificação traz as opções do Android (configurações, desativar...); código de verificação ganha "copiar código". **Responder pelo PC** (sem instalar nada no celular): os botões do próprio app (Responder, Marcar como lida, Curtir...) no cartão aberto, no aviso do canto e na Central do Windows; clicar na notificação abre o item exato (a conversa, o e-mail) na janela do app; foto de quem mandou e imagem da notificação. **Mini player**: o player do celular numa janelinha junto do relógio (menu do ícone ou atalho) |
-| **Parear** | **conexão**: o celular em uso, os outros por perto — inclusive os ainda não conectados, com **conectar** — e a conexão preferida — **sem fio** ou **cabo** (trocar não derruba nada: o que está aberto segue como está, o que abrir depois usa a nova; preferindo o cabo, funciona mesmo sem Wi-Fi). Preferindo o sem fio, **ligar o cabo abre o sem fio sozinho** (depois é só tirar o cabo). **adicionar**: parear à mão, com cabo ou com código. O quadradinho fica verde com o celular conectado, em tempo real |
+| **Notificações** | as notificações do celular no PC, com aviso no canto da tela, histórico, player e resposta pelo PC (veja abaixo) |
+| **Parear** | **conexão**: o celular em uso, os outros por perto (inclusive os ainda não conectados, com **conectar**) e a conexão preferida, **sem fio** ou **cabo** (trocar não derruba nada: o que está aberto segue como está, o que abrir depois usa a nova; preferindo o cabo, funciona mesmo sem Wi-Fi). Preferindo o sem fio, **ligar o cabo abre o sem fio sozinho** (depois é só tirar o cabo). **adicionar**: parear à mão, com cabo ou com código. O quadradinho fica verde com o celular conectado, em tempo real |
 | **Opções** | avisos do programa, abrir com o Windows, página inicial, pasta do scrcpy e atualizações; atalhos de teclado (com busca); **rodapé** com indicadores de conexão e som (cada gesto pode ganhar uma função). **Qualidade**, igual no cabo e no sem fio: **imagem** 540p / 720p / 1080p (4 / 8 / 16 Mb/s, 60 quadros, sem atraso), **som** normal ou alto, **janela dos apps** (pc / tablet ou celular) e **tamanho nos apps** (90% a 130%). Espelhar, Extensão e cada app podem ter a sua. No sem fio, o codificador do celular trabalha em tempo real e o Wi-Fi do celular entra no modo de baixa latência enquanto houver sessão (volta ao normal sozinho) |
 
 Tudo é gravado no instante do clique, sem botão de salvar.
@@ -52,7 +52,7 @@ para abrir cada app.
 - **Clique** abre o app (ou traz a janela dele para a frente); **botão
   direito** abre em tela cheia, fixa na lista, cria o atalho e leva às
   **configurações personalizadas** daquele app: imagem, som, **janela**
-  (pc / tablet — a tela de tablet do app, como num monitor — ou celular),
+  (pc / tablet, que usa a tela de tablet do app como num monitor, ou celular),
   **tamanho** (90% a 130%), onde o som toca, ao fechar, sempre em tela cheia
   e correções para apps que não se dão bem com mouse e teclado.
 - **Modo pc / tablet automático**: ao conectar, o programa lê de cada app se
@@ -62,8 +62,8 @@ para abrir cada app.
   somem esmaecendo e os outros deslizam até o lugar; agiu num resultado, a
   busca se apaga.
 - **Apps duplicados** (Dual Messenger do Samsung, "apps duplos" do Xiaomi,
-  perfil de trabalho...) aparecem duas vezes — "WhatsApp" e "WhatsApp (2)",
-  com um número no ícone — e cada um abre na sua janela, com ajustes e
+  perfil de trabalho...) aparecem duas vezes ("WhatsApp" e "WhatsApp (2)",
+  com um número no ícone) e cada um abre na sua janela, com ajustes e
   atalho próprios. A Pasta Segura do Samsung fica de fora.
 - **Atalho na área de trabalho** de cada app: dois cliques abrem o app direto,
   mesmo com o scrcpy-f fechado (e avisa se o celular não estiver conectado).
@@ -71,6 +71,31 @@ para abrir cada app.
   trabalho do DeX numa janela do PC.
 - A tela do celular pode ficar apagada enquanto os apps rodam no PC; o botão
   de ligar do celular acende e apaga a tela sem pausar os apps.
+
+### Notificações
+
+- Aparecem como no celular: **×** remove lá também, e o que você tira no
+  celular some aqui.
+- Quando chega uma, aparece um aviso no canto da tela; o clique abre o app
+  numa janela do PC. O aviso respeita o "não perturbe" do Windows.
+- **histórico** guarda as últimas 24 horas.
+- Em **ajustes**, uma chave geral (todos os apps) e uma por app; o botão
+  direito num app, em Apps, também liga ou desliga. A lista mostra quais apps
+  estão com as notificações desligadas no próprio celular. Nada disso muda o
+  celular.
+- Responder pelo PC, sem instalar nada no celular: os botões do próprio app
+  (Responder, Marcar como lida, Curtir...) aparecem no cartão aberto, no
+  aviso do canto e na Central de Notificações do Windows. Clicar na
+  notificação abre o item exato (a conversa, o e-mail) na janela do app, com
+  a foto de quem mandou e a imagem da notificação.
+- O botão direito numa notificação traz as opções do Android (configurações,
+  desativar...). Código de verificação ganha "copiar código".
+- No Windows, as notificações também ficam na Central de Notificações (o
+  clique abre no scrcpy-f), e a música que toca no celular aparece nos
+  controles de mídia do Windows e obedece às teclas de música do teclado.
+- O player do celular fica no topo da aba, com barra de progresso e botões.
+  O **mini player** mostra o mesmo numa janelinha junto do relógio (pelo menu
+  do ícone ou por atalho).
 
 ### Extensão: o celular ao lado do PC
 
@@ -91,10 +116,9 @@ na frente. Ctrl+Alt+Del e Windows+L continuam sendo do PC.
 Em **Opções › geral**, a tabela **atualizações** mostra a versão do
 **scrcpy-f** e do **scrcpy** e se cada um está em dia. **Procurar agora**
 confere na hora; em **procurar sozinho** você escolhe diário, semanal,
-mensal ou nunca. Versão nova aparece em laranja — clique nela para
-atualizar. Quando
-sai uma, o programa pergunta antes; com o sim, baixa, confere o arquivo e
-troca (pedindo permissão de administrador). Seus ajustes, apps e atalhos
+mensal ou nunca. Versão nova aparece em laranja: clique nela para
+atualizar. O programa sempre pergunta antes; com o sim, baixa, confere o
+arquivo e troca (pedindo permissão de administrador). Seus ajustes, apps e atalhos
 ficam como estão. A internet só é usada para isso, e só no GitHub.
 
 ## A janela
@@ -115,18 +139,18 @@ Windows.
 ## Compilando do código-fonte
 
 1. Clone este repositório e instale o Python 3.10 ou mais novo.
-2. `pip install -r publicacao\requirements.txt` — e dois cliques em
-   **`scrcpy-f.bat`** já rodam pelo código.
+2. Rode `pip install -r publicacao\requirements.txt`. Daí, dois cliques em
+   **`scrcpy-f.bat`** já rodam o programa pelo código.
 3. Dois cliques em **`publicar.bat`**: ele instala o PyInstaller se faltar e
    monta `dist\scrcpy-f-<versão>.zip`, o mesmo pacote das Releases.
 
 Uma versão nova publicada em Releases precisa da tag `v<versão>` e do arquivo
-`scrcpy-f-<versão>.zip` — é o que o atualizador procura.
+`scrcpy-f-<versão>.zip`, que é o que o atualizador procura.
 
 ## Como foi feito
 
 O scrcpy-f foi desenvolvido com apoio de inteligência artificial: o código foi
-escrito em conversa com o **Claude**, da Anthropic (no Claude Code). As decisões
+escrito em conversa com o Claude, da Anthropic (no Claude Code). As decisões
 de projeto, o desenho da interface, os testes com celulares e PCs de verdade e o
 rumo de cada funcionalidade são de [finjackin](https://github.com/finjackin1).
 O espelhamento em si é do [scrcpy](https://github.com/Genymobile/scrcpy), da
@@ -134,5 +158,6 @@ Genymobile.
 
 ## Licença
 
-GPLv3 — veja `LICENSE`. O scrcpy é da Genymobile (Apache 2.0) e não vem
-junto; os demais componentes estão em `docs\THIRD-PARTY-NOTICES.txt`.
+GPLv3: veja [LICENSE](LICENSE). O scrcpy é da Genymobile (Apache 2.0) e não
+vem junto; os demais componentes estão em
+[docs/THIRD-PARTY-NOTICES.txt](docs/THIRD-PARTY-NOTICES.txt).

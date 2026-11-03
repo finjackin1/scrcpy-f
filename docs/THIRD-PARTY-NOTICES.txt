@@ -1,21 +1,21 @@
-scrcpy-f — Avisos de Terceiros
-==============================
+﻿scrcpy-f: avisos de terceiros
+=============================
 
-O scrcpy-f utiliza os componentes de terceiros listados abaixo. Cada um
-permanece sob a licenca de seu proprio autor. Este arquivo existe para
-atender aos avisos de atribuicao exigidos por essas licencas.
+O scrcpy-f usa os componentes de terceiros listados abaixo. Cada um
+continua sob a licença do próprio autor. Este arquivo existe para atender
+aos avisos de atribuição exigidos por essas licenças.
 
-O scrcpy-f em si e distribuido sob a GNU General Public License v3.0 —
+O scrcpy-f em si é distribuído sob a GNU General Public License v3.0:
 veja o arquivo LICENSE.
 
 
 1. BIBLIOTECAS PYTHON (instaladas pelo requirements.txt)
 --------------------------------------------------------
 
-O nucleo do scrcpy-f — achar o celular, montar a linha de comando,
-subir e derrubar a sessao — usa so a biblioteca padrao do Python, de
-proposito. As duas bibliotecas abaixo existem por causa do icone da
-bandeja do Windows.
+O núcleo do scrcpy-f (achar o celular, montar a linha de comando, subir e
+derrubar a sessão) usa só a biblioteca padrão do Python, de propósito. O
+pystray e o Pillow existem por causa do ícone da bandeja do Windows e dos
+desenhos da janela; o pywinrt, por causa das notificações.
 
 pystray >= 0.19
   GNU Lesser General Public License v3.0
@@ -31,11 +31,11 @@ pywinrt (winrt-runtime e winrt-Windows.*) >= 3.2
   MIT License
   Copyright (c) Microsoft Corporation; Copyright (c) 2021-2025 David Lechner
   https://github.com/pywinrt/pywinrt
-  Usado para as notificacoes e o player do celular aparecerem no Windows
-  (Central de Notificacoes e controles de midia).
+  Usado para as notificações e o player do celular aparecerem no Windows
+  (Central de Notificações e controles de mídia).
 
 
-2. TEMPO DE EXECUCAO
+2. TEMPO DE EXECUÇÃO
 --------------------
 
 CPython (inclui o tkinter)
@@ -43,28 +43,27 @@ CPython (inclui o tkinter)
   Copyright (c) 2001 Python Software Foundation; All Rights Reserved
   https://docs.python.org/3/license.html
 
-  Na versao em codigo-fonte, instalado separadamente por quem usa. No
-  pacote publicado (scrcpy-f.exe, feito pelo publicar.bat com o
-  PyInstaller), o interpretador e as bibliotecas acima vao dentro da
-  pasta _internal.
+  Na versão em código-fonte, quem usa instala separadamente. No pacote
+  publicado (scrcpy-f.exe, feito pelo publicar.bat com o PyInstaller), o
+  interpretador e as bibliotecas acima vão dentro da pasta _internal.
 
 Tcl/Tk (a base do tkinter, vai no pacote)
-  Licenca do Tcl/Tk (estilo BSD)
+  Licença do Tcl/Tk (estilo BSD)
   Copyright (c) Regents of the University of California, Sun
   Microsystems, Inc., Scriptics Corporation e outros
   https://www.tcl.tk/software/tcltk/license.html
 
-OpenSSL (vai no pacote, pelo modulo ssl do Python)
+OpenSSL (vai no pacote, pelo módulo ssl do Python)
   Apache License 2.0
   Copyright (c) 1998-2025 The OpenSSL Project Authors
   https://www.openssl.org/source/license.html
 
-  Usado so para baixar o scrcpy e as versoes novas do scrcpy-f do GitHub
-  por https.
+  Usado só para baixar do GitHub, por https, o scrcpy e as versões novas
+  do scrcpy-f.
 
 
 3. PROGRAMAS EXTERNOS
-----------------------
+---------------------
 
 scrcpy
   Apache License 2.0
@@ -72,29 +71,29 @@ scrcpy
   Copyright (C) 2018-2026 Romain Vimont
   https://github.com/Genymobile/scrcpy
 
-  O scrcpy-f e um envelope em volta do scrcpy: ele chama o executavel
-  como programa externo. Nenhuma parte do scrcpy vai no codigo nem no
-  pacote publicado: o botao "instalar" baixa o zip oficial direto do
-  GitHub da Genymobile, na maquina de quem usa (ou a pessoa aponta a
-  pasta de um scrcpy que ja tem).
+  O scrcpy-f é um envelope em volta do scrcpy: ele chama o executável
+  como programa externo. Nenhuma parte do scrcpy vai no código nem no
+  pacote publicado. O botão "instalar" baixa o zip oficial direto do
+  GitHub da Genymobile, na máquina de quem usa (ou a pessoa aponta a
+  pasta de um scrcpy que já tem).
 
-adb — Android Debug Bridge (Android SDK Platform Tools)
+adb, Android Debug Bridge (Android SDK Platform Tools)
   Apache License 2.0
   Copyright (c) The Android Open Source Project
   https://developer.android.com/tools/adb
 
-  Acompanha o pacote do scrcpy. Chamado como programa externo, tambem
-  nao redistribuido.
+  Acompanha o pacote do scrcpy. Chamado como programa externo, também
+  não é redistribuído.
 
 
 4. COMPATIBILIDADE COM A GPLv3
--------------------------------
+------------------------------
 
-A LGPLv3 do pystray e feita para ser usada junto de qualquer licenca,
-inclusive a GPLv3. A licenca do Tcl/Tk e permissiva. A MIT-CMU do Pillow
-e a Apache License 2.0 (OpenSSL, scrcpy, adb) sao
-compativeis com a GPL versao 3 (a Apache 2.0 nao e compativel com a
-versao 2). A PSF License 2 e compativel com a GPL desde o Python 2.2.
+A LGPLv3 do pystray pode ser usada junto de qualquer licença, inclusive a
+GPLv3. A licença do Tcl/Tk e a MIT do pywinrt são permissivas. A MIT-CMU
+do Pillow e a Apache License 2.0 (OpenSSL, scrcpy, adb) são compatíveis
+com a GPL versão 3 (a Apache 2.0 não é compatível com a versão 2). A PSF
+License 2 é compatível com a GPL desde o Python 2.2.
 
-Nenhuma das dependencias acima impede a distribuicao do scrcpy-f sob a
+Nenhuma das dependências acima impede a distribuição do scrcpy-f sob a
 GPLv3.
